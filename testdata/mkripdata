@@ -1,0 +1,7 @@
+doas tcpdump -r rip.tcp -vvv -e -n > data
+sed -e 's/^[^{]*{//' data > d1
+sed -e 's/}[^}]*$//' d1 > d2
+sed 's/ tag [0-9][0-9]*//g'  < d2 > d3
+sed 's/(1)//g' < d3 > d4
+tr ' ' '\n' < d4 | tr -d '{}' > d5
+sed 's,/, ,;s/->.*$//' < d5 > d6
