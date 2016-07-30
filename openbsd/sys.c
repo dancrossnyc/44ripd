@@ -225,7 +225,7 @@ buildrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
 	header->rtm_addrs = RTA_DST | RTA_NETMASK;
 	if (cmd != RTM_DELETE)
 		header->rtm_addrs |= RTA_GATEWAY;
-	header->rtm_flags = RTF_UP | RTF_STATIC;
+	header->rtm_flags = RTF_UP /* | RTF_STATIC */;
 	header->rtm_fmask = 0;
 	header->rtm_pid = getpid();
 	header->rtm_seq = seqno++;
