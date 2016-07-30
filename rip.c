@@ -43,7 +43,8 @@ verifyripauth(RIPPacket *restrict packet, const char *restrict password)
 		return -1;
 	if (readnet16(packet->data + 2) != 2)
 		return -1;
-	strlcpy(packetpass, (char *)packet->data + 4, sizeof(packetpass));
+	memmove(packetpass, (char *)packet->data + 4, 16);
+	packetpass[16] = '\0';
 	if (strcmp(packetpass, password) != 0)
 		return -1;
 	--packet->nresponse;
