@@ -161,8 +161,11 @@ init(int argc, char *argv[])
 	localaddr = addr.s_addr;
 
 	initlog();
-	if (daemonize)
-		daemon(0, 1);
+	if (daemonize) {
+		const int chdiryes = 1;
+		const int closeyes = 1;
+		daemon(chdiryes, closeyes);
+	}
 
 	return sd;
 }
