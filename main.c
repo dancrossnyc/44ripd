@@ -62,6 +62,7 @@ void unlinkroute(Tunnel *tunnel, Route *route);
 void linkroute(Tunnel *tunnel, Route *route);
 void walkexpired(time_t now);
 void destroy(uint32_t key, size_t keylen, void *routep, void *unused);
+void collapse(Tunnel *tunnel);
 void expire(uint32_t key, size_t keylen, void *routep, void *statep);
 void usage(const char *restrict prog);
 
@@ -246,7 +247,7 @@ ripresponse(RIPResponse *response, time_t now)
 		    proute, cidr);
 	response->ipaddr &= response->subnetmask;
 	if (response->nexthop == localaddr) {
-		error("skipping route for %s/%zu to local address",
+		notice("skipping route for %s/%zu to local address",
 		    proute, cidr);
 		return;
 	}
@@ -269,7 +270,7 @@ ripresponse(RIPResponse *response, time_t now)
 		    response->subnetmask,
 		    response->nexthop);
 		ipmapinsert(routes, route->ipnet, cidr, route);
-		info("added route");
+		info("added route: %s/%zu -> %s", proute, cidr, gw);
 	}
 	// The route is new or moved to a different tunnel.
 	if (route->tunnel != tunnel) {
@@ -279,10 +280,11 @@ ripresponse(RIPResponse *response, time_t now)
 			chroute(route, tunnel, routetable);
 		unlinkroute(tunnel, route);
 		unlinkroute(route->tunnel, route);
+		collapse(route->tunnel);
 		linkroute(tunnel, route);
 	}
 	route->expires = now + TIMEOUT;
-	debug("RIPv2 response: %s/%zu -> %s\n", proute, cidr, gw);
+	debug("RIPv2 response: %s/%zu -> %s", proute, cidr, gw);
 }
 
 Route *
@@ -323,6 +325,7 @@ alloctunif(Tunnel *tunnel, Bitvec *interfaces)
 	tunnel->ifnum = ifnum;
 	snprintf(tunnel->ifname, sizeof(tunnel->ifname), "gif%zu", ifnum);
 	bitset(interfaces, ifnum);
+	info("Allocating tunnel interface %s", tunnel->ifname);
 }
 
 void
@@ -396,10 +399,16 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	Route *route = routep;
 	Tunnel *tunnel;
 	void *datum;
+	size_t cidr;
+	char proute[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
 
 	(void)unused;
 	if (route == NULL)
 		return;
+	cidr = netmask2cidr(route->subnetmask);
+	inet_ntop(AF_INET, &route->ipnet, proute, sizeof(proute));
+	inet_ntop(AF_INET, &route->gateway, gw, sizeof(gw));
+	info("Destroying route %s/%zu -> %s", proute, cidr, gw);
 	datum = ipmapremove(routes, key, keylen);
 	assert(datum == route);
 	tunnel = route->tunnel;
@@ -407,9 +416,18 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	unlinkroute(tunnel, route);
 	rmroute(route, routetable);
 	assert(tunnel->nref >= 0);
+	collapse(tunnel);
+}
+
+void
+collapse(Tunnel *tunnel)
+{
+	if (tunnel == NULL)
+		return;
 	if (tunnel->nref == 0) {
-		datum = ipmapremove(tunnels, tunnel->remote, CIDR_HOST);
+		void *datum = ipmapremove(tunnels, tunnel->remote, CIDR_HOST);
 		assert(datum == tunnel);
+		info("Tearing down tunnel interface %s", tunnel->ifname);
 		downtunnel(tunnel);
 		bitclr(interfaces, tunnel->ifnum);
 		free(tunnel);
