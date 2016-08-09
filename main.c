@@ -415,7 +415,6 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	assert(tunnel != NULL);
 	unlinkroute(tunnel, route);
 	rmroute(route, routetable);
-	assert(tunnel->nref >= 0);
 	collapse(tunnel);
 }
 
@@ -424,6 +423,7 @@ collapse(Tunnel *tunnel)
 {
 	if (tunnel == NULL)
 		return;
+	assert(tunnel->nref >= 0);
 	if (tunnel->nref == 0) {
 		void *datum = ipmapremove(tunnels, tunnel->remote, CIDR_HOST);
 		assert(datum == tunnel);
