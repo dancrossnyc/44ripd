@@ -1,3 +1,5 @@
+#include <arpa/inet.h>
+
 #include <inttypes.h>
 #include <stdbool.h>
 
@@ -23,6 +25,7 @@ int downtunnel(Tunnel *tunnel);
 int addroute(Route *route, Tunnel *tunnel, int rtable);
 int chroute(Route *route, Tunnel *tunnel, int rtable);
 int rmroute(Route *route, int rtable);
+void ipaddrstr(uint32_t addr, char buf[static INET_ADDRSTRLEN]);
 Bitvec *mkbitvec(void);
 void freebitvec(Bitvec *bits);
 int bitget(Bitvec *bits, size_t bit);

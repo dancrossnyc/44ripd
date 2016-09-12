@@ -240,11 +240,14 @@ ipmapinsert(IPMap *root, uint32_t key, size_t keylen, void *datum)
 }
 
 void *
-ipmapremove(IPMap *root, uint32_t key, size_t keylen)
+ipmapremove(IPMap *root, uint32_t key, size_t akeylen)
 {
 	IPMap *map, *parent, **pmap;
 	uint32_t rkey = revbits(key);		// Reverse key bits.
+	size_t keylen = akeylen;
+	char pkey[INET_ADDRSTRLEN];
 
+	ipaddrstr(key, pkey);
 	pmap = NULL;
 	parent = NULL;
 	map = root;
@@ -259,17 +262,35 @@ ipmapremove(IPMap *root, uint32_t key, size_t keylen)
 			} else if (map->left == NULL && map->right == NULL) {
 				IPMap *child;
 
+				// If not root, nil our parent's pointer to us.
 				if (pmap != NULL)
 					*pmap = NULL;
 				map->datum = NULL;
+
+				// Don't free the root; it is stable.
 				if (map != root)
 					free(map);
+
+				// If we are the root, or our parent has data,
+				// skip the rest of the logic and return the
+				// datum.
 				if (parent == NULL || parent->datum != NULL)
 					return datum;
+
+				// We nil'ed ourself out of the parent, find
+				// the parent's other (possibly-nil) child.
 				child = (parent->left != NULL) ?
 				            parent->left : parent->right;
+
+				// If it is nil, skip the rest of the logic.
 				if (child == NULL)
 					return datum;
+
+				// Otherwise, pull the child into the parent:
+				// Combine the keys, set datum to the child's
+				// datum, and reset the left and right child
+				// pointers to the child's.  Finally, free
+				// the child node.
 				parent->key |= (child->key << parent->keylen);
 				parent->keylen += child->keylen;
 				parent->datum = child->datum;
@@ -291,8 +312,11 @@ ipmapremove(IPMap *root, uint32_t key, size_t keylen)
 			return datum;
                 }
 		nkcp = cprefix(nmin(keylen, map->keylen), rkey, map->key);
-		if (nkcp != 0 && nkcp != map->keylen)
+		if (nkcp != 0 && nkcp != map->keylen) {
+			notice("ipmapremove: divergent key for %s/%zu (nkcp = %zu, keylen = %zu)",
+			    pkey, akeylen, nkcp, map->keylen);
 			return NULL;
+		}
 		assert(nkcp < keylen);
 		rkey >>= nkcp;
 		keylen -= nkcp;
@@ -305,6 +329,7 @@ ipmapremove(IPMap *root, uint32_t key, size_t keylen)
 			map = map->right;
 		}
 	}
+	notice("ipmapremove: key %s/%zu not found", pkey, akeylen);
 
 	return NULL;
 }
@@ -315,8 +340,7 @@ ipmapdorec(IPMap *map, uint32_t key, size_t keylen,
     void *arg)
 {
 	if (map == NULL) return;
-	key <<= map->keylen;
-	key |= map->key;
+	key |= (map->key << keylen);
 	keylen += map->keylen;
 	ipmapdorec(map->left, key, keylen, thunk, arg);
 	if (map->datum != NULL)

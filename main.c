@@ -240,8 +240,8 @@ ripresponse(RIPResponse *response, time_t now)
 	char proute[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
 
 	cidr = netmask2cidr(response->subnetmask);
-	inet_ntop(AF_INET, &response->ipaddr, proute, sizeof(proute));
-	inet_ntop(AF_INET, &response->nexthop, gw, sizeof(gw));
+	ipaddrstr(response->ipaddr, proute);
+	ipaddrstr(response->nexthop, gw);
 	if (response->ipaddr & ~response->subnetmask)
 		error("route ipaddr %s has more bits than netmask, %zu",
 		    proute, cidr);
@@ -384,12 +384,16 @@ expire(uint32_t key, size_t keylen, void *routep, void *statep)
 {
 	Route *route = routep;
 	WalkState *state = statep;
+	char proute[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
 
 	if (route->expires > state->now)
 		return;
 
 	if (state->deleting == NULL)
 		state->deleting = mkipmap(); 
+	ipaddrstr(route->ipnet, proute);
+	ipaddrstr(route->gateway, gw);
+	info("Expiring route %s/%zu -> %s");
 	ipmapinsert(state->deleting, key, keylen, route);
 }
 
@@ -406,8 +410,8 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	if (route == NULL)
 		return;
 	cidr = netmask2cidr(route->subnetmask);
-	inet_ntop(AF_INET, &route->ipnet, proute, sizeof(proute));
-	inet_ntop(AF_INET, &route->gateway, gw, sizeof(gw));
+	ipaddrstr(route->ipnet, proute);
+	ipaddrstr(route->gateway, gw);
 	info("Destroying route %s/%zu -> %s", proute, cidr, gw);
 	datum = ipmapremove(routes, key, keylen);
 	assert(datum == route);

@@ -302,3 +302,9 @@ rmroute(Route *route, int rtable)
 
 	return 0;
 }
+
+void
+ipaddrstr(uint32_t addr, char buf[static INET_ADDRSTRLEN])
+{
+	inet_ntop(AF_INET, &addr, buf, INET_ADDRSTRLEN);
+}

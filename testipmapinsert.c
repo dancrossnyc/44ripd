@@ -81,7 +81,7 @@ int
 main(void)
 {
 	IPMap *root;
-	Entry *entries, *entry;
+	Entry *entries, *entry, *prev;
 	void *v, *datum;
 	size_t keylen;
 	uint32_t key;
@@ -140,6 +140,15 @@ main(void)
 		}
 	}
 
+	prev = NULL;
+	entry = entries;
+	while (entry != NULL) {
+		Entry *current = entry;
+		entry = entry->next;
+		current->next = prev;
+		prev = current;
+	}
+	entries = prev;
 	entry = entries;
 	while (entry != NULL) {
 		Entry *tmp = entry;
