@@ -270,7 +270,7 @@ ripresponse(RIPResponse *response, time_t now)
 		    response->subnetmask,
 		    response->nexthop);
 		ipmapinsert(routes, route->ipnet, cidr, route);
-		info("added route: %s/%zu -> %s", proute, cidr, gw);
+		info("Added route %s/%zu -> %s", proute, cidr, gw);
 	}
 	// The route is new or moved to a different tunnel.
 	if (route->tunnel != tunnel) {
@@ -384,6 +384,7 @@ expire(uint32_t key, size_t keylen, void *routep, void *statep)
 {
 	Route *route = routep;
 	WalkState *state = statep;
+	size_t cidr;
 	char proute[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
 
 	if (route->expires > state->now)
@@ -391,9 +392,11 @@ expire(uint32_t key, size_t keylen, void *routep, void *statep)
 
 	if (state->deleting == NULL)
 		state->deleting = mkipmap(); 
+	cidr = netmask2cidr(route->subnetmask);
+	assert(cidr == keylen);
 	ipaddrstr(route->ipnet, proute);
 	ipaddrstr(route->gateway, gw);
-	info("Expiring route %s/%zu -> %s");
+	info("Expiring route %s/%zu -> %s", proute, cidr, gw);
 	ipmapinsert(state->deleting, key, keylen, route);
 }
 
@@ -410,6 +413,7 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	if (route == NULL)
 		return;
 	cidr = netmask2cidr(route->subnetmask);
+	assert(cidr == keylen);
 	ipaddrstr(route->ipnet, proute);
 	ipaddrstr(route->gateway, gw);
 	info("Destroying route %s/%zu -> %s", proute, cidr, gw);
