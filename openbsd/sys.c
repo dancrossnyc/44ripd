@@ -122,15 +122,15 @@ uptunnel(Tunnel *tunnel, int rtable)
 
 	addr.sin_len = sizeof(addr);
 	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = tunnel->local;
+	addr.sin_addr.s_addr = htonl(tunnel->local);
 	assert(sizeof(addr) <= sizeof(ifar.ifra_addr));
 	memmove(&ifar.ifra_addr, &addr, sizeof(addr));
 
-	addr.sin_addr.s_addr = tunnel->remote;
+	addr.sin_addr.s_addr = htonl(tunnel->remote);
 	assert(sizeof(addr) <= sizeof(ifar.ifra_dstaddr));
 	memmove(&ifar.ifra_dstaddr, &addr, sizeof(addr));
 
-	addr.sin_addr.s_addr = hostmask;
+	addr.sin_addr.s_addr = htonl(hostmask);
 	assert(sizeof(addr) <= sizeof(ifar.ifra_mask));
 	memmove(&ifar.ifra_mask, &addr, sizeof(addr));
 
@@ -235,7 +235,7 @@ buildrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
 	dst = &msg->dst;
 	dst->sin_len = sizeof(*dst);
 	dst->sin_family = AF_INET;
-	dst->sin_addr.s_addr = route->ipnet;
+	dst->sin_addr.s_addr = htonl(route->ipnet);
 
 	netmask = &msg->gw;
 	if (cmd != RTM_DELETE) {
@@ -243,12 +243,12 @@ buildrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
 		gw = &msg->gw;
 		gw->sin_len = sizeof(*gw);
 		gw->sin_family = AF_INET;
-		gw->sin_addr.s_addr = tunnel->remote;
+		gw->sin_addr.s_addr = htonl(tunnel->remote);
 	}
 
 	netmask->sin_len = sizeof(*netmask);
 	netmask->sin_family = AF_INET;
-	netmask->sin_addr.s_addr = route->subnetmask;
+	netmask->sin_addr.s_addr = htonl(route->subnetmask);
 	if (cmd == RTM_DELETE)
 		header->rtm_msglen -= sizeof(*gw);
 
