@@ -1,11 +1,14 @@
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/sockio.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <net/if_var.h>
 #include <net/route.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
+#include <netinet/in_var.h>
 #include <arpa/inet.h>
 
 #include <assert.h>
@@ -24,8 +27,10 @@
 
 static int ctlfd = -1;
 static int rtfd = -1;
+static int rtfd_rtable = -1;
 
 uint32_t hostmask;
+
 
 void
 initsys(int rtable)
@@ -40,8 +45,26 @@ initsys(int rtable)
 		err(EXIT_FAILURE, "route socket");
 	if (shutdown(rtfd, SHUT_RD) < 0)
 		err(EXIT_FAILURE, "route shutdown read");
-	//if (setsockopt(rtfd, SOL_SOCKET, SO_RTABLE, &rtable, sizeof(rtable)) < 0)
-	//	err(EXIT_FAILURE, "setsockopt rtfd SO_RTABLE");
+
+	//
+	// FreeBSD doesn't have the ability to specify which route table
+	// to modify on a routing-command basis. It only allows it to be
+	// set on the routing socket itself for the entire session.
+	//
+	// Fortunately this is not a problem as we don't switch the routing
+	// table we use on a command-to-command basis anyways.
+	//
+	if (setsockopt(rtfd, SOL_SOCKET, SO_SETFIB, &rtable,
+	               sizeof(rtable)) < 0)
+		err(EXIT_FAILURE, "setsockopt rtfd SO_SETFIB");
+
+	//
+	// Save the route table that we set so that we can check that
+	// all incoming route table modification requests are meant
+	// for said table. (This is merely to check the program for
+	// bitrot).
+	//
+	rtfd_rtable = rtable;
 
 	// Create prototype tunnel netmask.
 	memset(&addr, 0, sizeof(addr));
@@ -62,8 +85,8 @@ initsock(const char *restrict group, int port, int rtable)
 	on = 1;
 	if (setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
 		err(EXIT_FAILURE, "setsockopt SO_REUSEADDR");
-	if (setsockopt(sd, SOL_SOCKET, SO_RTABLE, &rtable, sizeof(rtable)) < 0)
-		err(EXIT_FAILURE, "setsockopt SO_RTABLE");
+	if (setsockopt(sd, SOL_SOCKET, SO_SETFIB, &rtable, sizeof(rtable)) < 0)
+		err(EXIT_FAILURE, "setsockopt SO_SETFIB");
 	memset(&sin, 0, sizeof(sin));
 	sin.sin_family = AF_INET;
 	sin.sin_port = htons(port);
@@ -100,7 +123,7 @@ int
 uptunnel(Tunnel *tunnel, int rtable)
 {
 	struct ifreq ifr;
-	struct ifaliasreq ifar;
+	struct in_aliasreq ifar;
 	struct sockaddr_in addr;
 
 	assert(tunnel != NULL);
@@ -111,11 +134,30 @@ uptunnel(Tunnel *tunnel, int rtable)
 	memset(&ifar, 0, sizeof(ifar));
 	memset(&addr, 0, sizeof(addr));
 
+#ifndef SIOCSTUNFIB
+	//
+	// FreeBSD 10.2 introduced the SIOSTUNFIB ioctl, which allows
+	// the route table (FIB) used by the tunnel to be changed after the
+	// tunnel has been created.
+	//
+	// Before FreeBSD 10.2, the only way to set this value was to
+	// set the FIB on the thread which created the interface.
+	// Set the tunnnel routing domain.
+	if (setfib(rtable) < 0)
+		err(EXIT_FAILURE, "cannot set tunnel routing table %s",
+		    tunnel->ifname);
+#endif
+
 	// Create the interface.
 	strlcpy(ifr.ifr_name, tunnel->ifname, sizeof(ifr.ifr_name));
 	if (ioctl(ctlfd, SIOCIFCREATE, &ifr) < 0)
 		err(EXIT_FAILURE, "create %s failed", tunnel->ifname);
 
+#ifndef SIOCSTUNFIB
+	// Restore thread's FIB
+	setfib(0);
+#endif
+	
 	// Initialize the alias structure.  This is used for both
 	// configuring the tunnel and IP.
 	strlcpy(ifar.ifra_name, tunnel->ifname, sizeof(ifar.ifra_name));
@@ -130,10 +172,6 @@ uptunnel(Tunnel *tunnel, int rtable)
 	assert(sizeof(addr) <= sizeof(ifar.ifra_dstaddr));
 	memmove(&ifar.ifra_dstaddr, &addr, sizeof(addr));
 
-	addr.sin_addr.s_addr = hostmask;
-	assert(sizeof(addr) <= sizeof(ifar.ifra_mask));
-	memmove(&ifar.ifra_mask, &addr, sizeof(addr));
-
 	// Configure the tunnel.
 	if (ioctl(ctlfd, SIOCSIFPHYADDR, &ifar) < 0) {
 		char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN];
@@ -144,14 +182,23 @@ uptunnel(Tunnel *tunnel, int rtable)
 		    tunnel->ifname, local, remote);
 	}
 
+#ifdef SIOCSTUNFIB
+	//
+	// FreeBSD 10.2 introduced the SIOSTUNFIB ioctl, which allows
+	// the route table (FIB) used by the tunnel to be changed after the
+	// tunnel has been created.
+	//
+	// Before FreeBSD 10.2, the only way to set this value was to
+	// set the FIB on the thread which created the interface.
 	// Set the tunnnel routing domain.
-	ifr.ifr_rdomainid = rtable;
-	if (ioctl(ctlfd, SIOCSLIFPHYRTABLE, &ifr) < 0)
+	ifr.ifr_fib = rtable;
+	if (ioctl(ctlfd, SIOCSTUNFIB, &ifr) < 0)
 		err(EXIT_FAILURE, "cannot set tunnel routing table %s",
 		    tunnel->ifname);
-
+#endif
+	
 	// Set the interface routing domain.
-	if (ioctl(ctlfd, SIOCSIFRDOMAIN, &ifr) < 0)
+	if (ioctl(ctlfd, SIOCSIFFIB, &ifr) < 0)
 		err(EXIT_FAILURE, "cannot set interface routing table %s",
 		    tunnel->ifname);
 
@@ -212,16 +259,20 @@ buildrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
 	assert(route != NULL);
 	if (cmd != RTM_DELETE)
 		assert(tunnel != NULL);
-	assert(rtable >= 0);
 	assert(msg != NULL);
+
+	//
+	// On FreeBSD we cannot switch the route table being modified from
+	// message to message. This code doesn't do so anyways, but make
+	// sure of that to insure against bitrot.
+	//
+	assert(rtable == rtfd_rtable);
 
 	memset(msg, 0, sizeof(*msg));
 	header = &msg->header;
 	header->rtm_msglen = sizeof(*msg);
 	header->rtm_version = RTM_VERSION;
 	header->rtm_type = cmd;
-	header->rtm_hdrlen = sizeof(*header);
-	header->rtm_tableid = rtable;
 	header->rtm_addrs = RTA_DST | RTA_NETMASK;
 	if (cmd != RTM_DELETE)
 		header->rtm_addrs |= RTA_GATEWAY;

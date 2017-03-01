@@ -1,14 +1,14 @@
 #
-CC=			egcc
-FLAGS=			-Wall -Werror -ansi -pedantic -std=c11 -I. -Iopenbsd # -DUSE_COMPAT
+#CC=			egcc
+FLAGS=			-Wall -Werror -ansi -pedantic -std=c11 -I. -DUSE_COMPAT
 CFLAGS=			$(FLAGS) -g
-SRCS=			main.c rip.c lib.c openbsd/sys.c compat.c
-OBJS=			main.o rip.o lib.o openbsd/sys.o compat.o
+SRCS=			main.c rip.c lib.c freebsd/sys.c compat.c
+OBJS=			main.o rip.o lib.o freebsd/sys.o compat.o
 PROG=			44ripd
 TESTS=			testbitvec testipmapfind testipmapnearest \
 			testisvalidnetmask testnetmask2cidr testrevbits
 DTESTS=			testipmapinsert
-TOBJS=			lib.o openbsd/sys.o compat.o
+TOBJS=			lib.o freebsd/sys.o compat.o
 LIBS=		
 
 all:			$(PROG)
