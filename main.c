@@ -303,8 +303,8 @@ ripresponse(RIPResponse *response, time_t now)
 		    proute, cidr);
 		return;
 	}
-	if ((response->nexthop & response->ipaddr) == response->nexthop) {
-		error("skipping gateway inside of subnet (%s/%zu -> %s)",
+	if ((response->nexthop & response->subnetmask) == response->ipaddr) {
+		info("skipping gateway inside of subnet (%s/%zu -> %s)",
 		    proute, cidr, gw);
 		return;
 	}

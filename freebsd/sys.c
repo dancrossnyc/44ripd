@@ -13,7 +13,6 @@
 #include <arpa/inet.h>
 
 #include <assert.h>
-#include <err.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -30,8 +29,7 @@ static int ctlfd = -1;
 static int rtfd = -1;
 static int rtfd_rtable = -1;
 
-uint32_t hostmask;
-
+static uint32_t hostmask;
 
 void
 initsys(int rtable)
@@ -40,12 +38,12 @@ initsys(int rtable)
 
 	ctlfd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (ctlfd < 0)
-		err(EXIT_FAILURE, "ctl socket");
+		fatale("ctl socket");
 	rtfd = socket(PF_ROUTE, SOCK_RAW, AF_INET);
 	if (rtfd < 0)
-		err(EXIT_FAILURE, "route socket");
+		fatale("route socket");
 	if (shutdown(rtfd, SHUT_RD) < 0)
-		err(EXIT_FAILURE, "route shutdown read");
+		fatale("route shutdown read");
 
 	//
 	// FreeBSD doesn't have the ability to specify which route table
@@ -57,7 +55,7 @@ initsys(int rtable)
 	//
 	if (setsockopt(rtfd, SOL_SOCKET, SO_SETFIB, &rtable,
 	               sizeof(rtable)) < 0)
-		err(EXIT_FAILURE, "setsockopt rtfd SO_SETFIB");
+		fatale("setsockopt rtfd SO_SETFIB");
 
 	//
 	// Save the route table that we set so that we can check that
@@ -82,23 +80,23 @@ initsock(const char *restrict group, int port, int rtable)
 
 	sd = socket(PF_INET, SOCK_DGRAM, 0);
 	if (sd < 0)
-		err(EXIT_FAILURE, "socket");
+		fatale("socket UDP");
 	on = 1;
 	if (setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
-		err(EXIT_FAILURE, "setsockopt SO_REUSEADDR");
+		fatale("setsockopt SO_REUSEADDR");
 	if (setsockopt(sd, SOL_SOCKET, SO_SETFIB, &rtable, sizeof(rtable)) < 0)
-		err(EXIT_FAILURE, "setsockopt SO_SETFIB");
+		fatale("setsockopt SO_SETFIB");
 	memset(&sin, 0, sizeof(sin));
 	sin.sin_family = AF_INET;
 	sin.sin_port = htons(port);
 	sin.sin_addr.s_addr = htonl(INADDR_ANY);
 	if (bind(sd, (struct sockaddr *)&sin, sizeof(sin)) < 0)
-		err(EXIT_FAILURE, "bind");
+		fatale("bind UDP");
 	memset(&mr, 0, sizeof(mr));
 	inet_pton(AF_INET, group, &mr.imr_multiaddr.s_addr);
 	mr.imr_interface.s_addr = htonl(INADDR_ANY);
 	if (setsockopt(sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mr, sizeof(mr)) < 0)
-		err(EXIT_FAILURE, "setsockopt");
+		fatale("setsockopt IP_ADD_MEMBERSHIP");
 
 	return sd;
 }
@@ -146,14 +144,14 @@ uptunnel(Tunnel *tunnel, int rtable)
 	// set the FIB on the thread which created the interface.
 	// Set the tunnnel routing domain.
 	if (setfib(rtable) < 0)
-		err(EXIT_FAILURE, "cannot set tunnel routing table %s",
+		fatal("cannot set tunnel routing table %s: %m",
 		    tunnel->ifname);
 #endif
 
 	// Create the interface.
 	strlcpy(ifr.ifr_name, tunnel->ifname, sizeof(ifr.ifr_name));
 	if (ioctl(ctlfd, SIOCIFCREATE, &ifr) < 0)
-		err(EXIT_FAILURE, "create %s failed", tunnel->ifname);
+		fatal("create %s failed: %m");
 
 #ifndef SIOCSTUNFIB
 	// Restore thread's FIB
@@ -180,7 +178,7 @@ uptunnel(Tunnel *tunnel, int rtable)
 
 		ipaddrstr(tunnel->outer_local, local);
 		ipaddrstr(tunnel->outer_remote, remote);
-		err(EXIT_FAILURE, "tunnel %s failed (local %s remote %s)",
+		fatal("tunnel %s failed (local %s remote %s): %m",
 		    tunnel->ifname, local, remote);
 	}
 
@@ -195,13 +193,13 @@ uptunnel(Tunnel *tunnel, int rtable)
 	// Set the tunnnel routing domain.
 	ifr.ifr_fib = rtable;
 	if (ioctl(ctlfd, SIOCSTUNFIB, &ifr) < 0)
-		err(EXIT_FAILURE, "cannot set tunnel routing table %s",
+		fatal("cannot set tunnel routing table %s: %m",
 		    tunnel->ifname);
 #endif
 	
 	// Set the interface routing domain.
 	if (ioctl(ctlfd, SIOCSIFFIB, &ifr) < 0)
-		err(EXIT_FAILURE, "cannot set interface routing table %s",
+		fatal("cannot set interface routing table %s: %m",
 		    tunnel->ifname);
 
 	// Bring the interface up and mark running.
@@ -210,10 +208,10 @@ uptunnel(Tunnel *tunnel, int rtable)
 	// IFF_ALLMULTI|IFF_MULTICAST) as the kernel does not allow
 	// userspace programs to modify those flags.
 	if (ioctl(ctlfd, SIOCGIFFLAGS, &ifr) < 0)
-		err(EXIT_FAILURE, "cannot get flags for %s", tunnel->ifname);
+		fatal("cannot get flags for %s: %m", tunnel->ifname);
 	ifr.ifr_flags |= (IFF_UP | IFF_RUNNING);
 	if (ioctl(ctlfd, SIOCSIFFLAGS, &ifr) < 0)
-		err(EXIT_FAILURE, "cannot set flags for %s", tunnel->ifname);
+		fatal("cannot set flags for %s: %m", tunnel->ifname);
 
 
 	//
@@ -234,7 +232,7 @@ uptunnel(Tunnel *tunnel, int rtable)
 		char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN];
 		ipaddrstr(tunnel->inner_local, local);
 		ipaddrstr(tunnel->inner_remote, remote);
-		err(EXIT_FAILURE, "inet %s failed (local %s, remote %s)",
+		fatal("inet %s failed (local %s, remote %s): %m",
 		    tunnel->ifname, local, remote);
 	}
 
@@ -251,7 +249,7 @@ downtunnel(Tunnel *tunnel)
 	memset(&ifr, 0, sizeof(ifr));
 	strlcpy(ifr.ifr_name, tunnel->ifname, sizeof(ifr.ifr_name));
 	if (ioctl(ctlfd, SIOCIFDESTROY, &ifr) < 0)
-		err(EXIT_FAILURE, "destroying %s failed", tunnel->ifname);
+		fatal("destroying %s failed: %m", tunnel->ifname);
 
 	return 0;
 }
@@ -344,7 +342,7 @@ addroute(Route *route, Tunnel *tunnel, int rtable)
 
 	len = buildrtmsg(RTM_ADD, route, tunnel, rtable, &rtmsg);
 	if (write(rtfd, &rtmsg, len) != len)
-		err(EXIT_FAILURE, "route add failure");
+		fatale("route add failure");
 
 	return 0;
 }
@@ -361,7 +359,16 @@ chroute(Route *route, Tunnel *tunnel, int rtable)
 			rmroute(route, rtable);
 			return addroute(route, tunnel, rtable);
 		}
-		err(EXIT_FAILURE, "route change failure");
+		char net[INET_ADDRSTRLEN], oldgw[INET_ADDRSTRLEN],
+		     newgw[INET_ADDRSTRLEN];
+		int cidr;
+		ipaddrstr(route->ipnet, net);
+		cidr = netmask2cidr(route->subnetmask);
+		ipaddrstr(route->tunnel->outer_remote, oldgw);
+		ipaddrstr(tunnel->outer_remote, newgw);
+		fatal("route change failure: net %s/%d -> %s:%s to "
+		    "%s:%s: %m", net, cidr, route->tunnel->ifname,
+		    oldgw, tunnel->ifname, newgw);
 	}
 
 	return 0;
@@ -376,7 +383,7 @@ rmroute(Route *route, int rtable)
 	len = buildrtmsg(RTM_DELETE, route, NULL, rtable, &rtmsg);
 	if (write(rtfd, &rtmsg, len) != len)
 		if (errno != ESRCH)
-			err(EXIT_FAILURE, "route change failure");
+			fatale("route change failure");
 
 	return 0;
 }

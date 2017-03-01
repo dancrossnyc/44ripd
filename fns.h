@@ -39,6 +39,7 @@ void info(const char *restrict fmt, ...);
 void notice(const char *restrict fmt, ...);
 void error(const char *restrict fmt, ...);
 void fatal(const char *restrict fmt, ...);
+void fatale(const char *restrict msg);
 
 #ifdef USE_COMPAT
 void *reallocarray(void *p, size_t nelem, size_t size);

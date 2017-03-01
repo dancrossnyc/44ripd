@@ -481,3 +481,10 @@ fatal(const char *fmt, ...)
 	va_end(ap);
 	exit(EXIT_FAILURE);
 }
+
+void
+fatale(const char *msg)
+{
+	syslog(LOG_ERR, "%s: %m", msg);
+	exit(EXIT_FAILURE);
+}
