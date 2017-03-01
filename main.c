@@ -299,7 +299,7 @@ ripresponse(RIPResponse *response, time_t now)
 		    proute, cidr);
 	response->ipaddr &= response->subnetmask;
 	if (response->nexthop == local_outer_addr) {
-		notice("skipping route for %s/%zu to local address",
+		info("skipping route for %s/%zu to local address",
 		    proute, cidr);
 		return;
 	}
