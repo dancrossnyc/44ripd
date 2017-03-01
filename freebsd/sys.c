@@ -47,6 +47,8 @@ static uint32_t hostmask;
 
 static void discoverroute(iface_info *ifaces, int rtable,
     struct rt_msghdr *rtm, rt_discovered_thunk thunk, void *arg);
+static void tunnel_configure_inner(Tunnel *tunnel);
+static void tunnel_rebase(Tunnel *tunnel, Route *route, int rtable);
 
 static inline size_t
 sa_roundup(size_t len)
@@ -519,8 +521,7 @@ uptunnel(Tunnel *tunnel, int rtable)
 	setfib(0);
 #endif
 	
-	// Initialize the alias structure.  This is used for both
-	// configuring the tunnel and IP.
+	// Initialize the alias structure.
 	strlcpy(ifar.ifra_name, tunnel->ifname, sizeof(ifar.ifra_name));
 
 	addr.sin_len = sizeof(addr);
@@ -575,28 +576,10 @@ uptunnel(Tunnel *tunnel, int rtable)
 	if (ioctl(ctlfd, SIOCSIFFLAGS, &ifr) < 0)
 		fatal("cannot set flags for %s: %m", tunnel->ifname);
 
-
 	//
 	// Set up the tunnel's inner addresses.
 	//
-	addr.sin_len = sizeof(addr);
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(tunnel->inner_local);
-	assert(sizeof(addr) <= sizeof(ifar.ifra_addr));
-	memmove(&ifar.ifra_addr, &addr, sizeof(addr));
-
-	addr.sin_addr.s_addr = htonl(tunnel->inner_remote);
-	assert(sizeof(addr) <= sizeof(ifar.ifra_dstaddr));
-	memmove(&ifar.ifra_dstaddr, &addr, sizeof(addr));
-
-	// Configure IP on interface.
-	if (ioctl(ctlfd, SIOCAIFADDR, &ifar) < 0) {
-		char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN];
-		ipaddrstr(tunnel->inner_local, local);
-		ipaddrstr(tunnel->inner_remote, remote);
-		fatal("inet %s failed (local %s, remote %s): %m",
-		    tunnel->ifname, local, remote);
-	}
+	tunnel_configure_inner(tunnel);
 
 	return 0;
 }
@@ -719,10 +702,20 @@ addroute(Route *route, Tunnel *tunnel, int rtable)
 int
 chroute(Route *route, Tunnel *tunnel, int rtable)
 {
-	Routemsg rtmsg;
-	size_t len;
+	//
+	// If the loosing tunnel bases its inner endpoint on the
+	// route being lost then said tunnel needs to be reconfigured
+	// to point to a new endpoint.
+	//
+	assert(route->tunnel != NULL);
+	if (route->tunnel->inner_remote == route->ipnet) {
+		tunnel_rebase(route->tunnel, route, rtable);
+		return addroute(route, tunnel, rtable);
+	}
 
-	len = buildrtmsg(RTM_CHANGE, route, tunnel, rtable, &rtmsg);
+	Routemsg rtmsg;
+
+	size_t len = buildrtmsg(RTM_CHANGE, route, tunnel, rtable, &rtmsg);
 	if (write(rtfd, &rtmsg, len) != len) {
 		if (errno == ESRCH) {
 			rmroute(route, rtable);
@@ -746,6 +739,18 @@ chroute(Route *route, Tunnel *tunnel, int rtable)
 int
 rmroute(Route *route, int rtable)
 {
+	//
+	// If the loosing tunnel bases its inner endpoint on the
+	// route being lost then said tunnel needs to be reconfigured
+	// to point to a new endpoint.
+	//
+	if (route->tunnel->inner_remote == route->ipnet) {
+		// Rebase the tunnel. By not re-adding the route afterwards
+		// we will have effectively removed it.
+		tunnel_rebase(route->tunnel, route, rtable);
+		return 0;
+	}
+
 	Routemsg rtmsg;
 	size_t len;
 
@@ -762,6 +767,84 @@ rmroute(Route *route, int rtable)
 
 	return 0;
 }
+
+// Reconfigure a tunnel as it is about to loose the basis route
+// that formed it.
+static void
+tunnel_rebase(Tunnel *tunnel, Route *route, int rtable)
+{
+	assert(route->tunnel == tunnel);
+
+	if (tunnel->nref == 1) {
+		//
+		// The tunnel only has one route. Just bring it down
+		// (but don't destroy it.)
+		//
+		struct ifreq ifr;
+		strlcpy(ifr.ifr_name, tunnel->ifname, sizeof(ifr.ifr_name));
+		if (ioctl(ctlfd, SIOCGIFFLAGS, &ifr) < 0)
+			fatal("cannot get flags for %s: %m", tunnel->ifname);
+		ifr.ifr_flags &= ~(IFF_UP);
+		if (ioctl(ctlfd, SIOCSIFFLAGS, &ifr) < 0)
+			fatal("cannot set flags for %s: %m", tunnel->ifname);
+		return;
+	}
+
+	//
+	// Find another route to rebase the tunnel upon.
+	//
+	Route *newrt;
+	for (newrt = tunnel->routes; newrt != NULL; newrt = newrt->rnext)
+		if (newrt != route)
+			break;
+
+	assert(newrt != NULL);
+
+	//
+	// Have the newly chosen route's network become the target host for
+	// this interface.
+	//
+	tunnel->inner_remote = newrt->ipnet;
+	tunnel_configure_inner(tunnel);
+
+	//
+	// Unfortunately, this completely destroys the routes that were
+	// attached to this interface. We now have to re-add them.
+	//
+	Route *other;
+	for (other = tunnel->routes; other != NULL; other = other->rnext)
+		if (other != route && other != newrt)
+			addroute(route, tunnel, rtable);
+}
+
+static void
+tunnel_configure_inner(Tunnel *tunnel)
+{
+	struct sockaddr_in addr;
+	struct in_aliasreq ifar;
+
+	strlcpy(ifar.ifra_name, tunnel->ifname, sizeof(ifar.ifra_name));
+
+	addr.sin_len = sizeof(addr);
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(tunnel->inner_local);
+	assert(sizeof(addr) <= sizeof(ifar.ifra_addr));
+	memmove(&ifar.ifra_addr, &addr, sizeof(addr));
+
+	addr.sin_addr.s_addr = htonl(tunnel->inner_remote);
+	assert(sizeof(addr) <= sizeof(ifar.ifra_dstaddr));
+	memmove(&ifar.ifra_dstaddr, &addr, sizeof(addr));
+
+	// Configure IP on interface.
+	if (ioctl(ctlfd, SIOCAIFADDR, &ifar) < 0) {
+		char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN];
+		ipaddrstr(tunnel->inner_local, local);
+		ipaddrstr(tunnel->inner_remote, remote);
+		fatal("inet %s failed (local %s, remote %s): %m",
+		    tunnel->ifname, local, remote);
+	}
+}
+	
 
 /*
  * Assumes addr is in host order.

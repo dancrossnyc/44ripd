@@ -58,6 +58,7 @@
 
 static int init(int argc, char *argv[]);
 static void learnsys(int rtable);
+static void cleanup(void);
 static void learn_interface_callback(const char *name, int num,
     uint32_t outer_local, uint32_t outer_remote, uint32_t inner_local,
     uint32_t inner_remote, void *arg);
@@ -84,6 +85,7 @@ static int tunnelfindbyname(uint32_t key, uint32_t keylen, void *datum,
 static int tunnelfindbydest(uint32_t key, uint32_t keylen, void *datum,
    void *arg);
 static int fix_overlaps(uint32_t key, size_t keylen, void *tunnelp, void *arg);
+static int find_empty(uint32_t key, size_t keylen, void *tunnelp, void *arg);
 static int unlink_redundant(uint32_t key, size_t keylen, void *routep,
    void *arg);
 static void dump_all(FILE *out);
@@ -92,6 +94,7 @@ typedef struct SystemBuildContext SystemBuildContext;
 typedef struct TunnelFindByNameParams TunnelFindByNameParams;
 typedef struct TunnelFindByDestParams TunnelFindByDestParams;
 typedef struct UnlinkRedundantParams UnlinkRedundantParams;
+typedef struct TunnelList TunnelList;
 
 struct SystemBuildContext {
 	IPMap *acceptableroutes;
@@ -114,6 +117,11 @@ struct TunnelFindByDestParams {
 struct UnlinkRedundantParams {
 	Tunnel *tunnel;
 	Route *parent;
+};
+
+struct TunnelList {
+	Tunnel *tunnel;
+	TunnelList *next;
 };
 
 enum {
@@ -200,10 +208,10 @@ init(int argc, char *argv[])
 
 			slash = strchr(optarg, '/');
 			if (slash == NULL)
-				fatal("Bad route (use CIDR): %s\n", optarg);
+				fatal("Bad route (use CIDR): %s", optarg);
 			*slash++ = '\0';
 			if (inet_aton(optarg, &iroute) != 1)
-				fatal("Bad route addr: %s\n", optarg);
+				fatal("Bad route addr: %s", optarg);
 			iroute.s_addr = ntohl(iroute.s_addr);
 			icidr = strnum(slash);
 			ipmapinsert(acceptableroutes, iroute.s_addr, icidr,
@@ -219,11 +227,11 @@ init(int argc, char *argv[])
 		}
 		case 'f': {
 			if (read_from_file)
-				fatal("Can only read from one file.\n");
+				fatal("Can only read from one file.");
 			read_from_file = 1;
 			sd = open(optarg, O_RDONLY);
 			if (sd < 0)
-				fatal("Can't open '%s'\n", optarg);
+				fatal("Can't open '%s'", optarg);
 			break;
 		}
 		case '?':
@@ -252,6 +260,8 @@ init(int argc, char *argv[])
 	inet_pton(AF_INET, local_inner_ip, &addr);
 	local_inner_addr = ntohl(addr.s_addr);
 
+	initlog();
+
 	learnsys(routetable_create);
 
 	if (dump) {
@@ -264,7 +274,8 @@ init(int argc, char *argv[])
 	if (!read_from_file)
 		sd = initsock(RIPV2_GROUP, RIPV2_PORT, routetable_bind);
 
-	initlog();
+	cleanup();
+
 	if (daemonize) {
 		const int no_chdir = 0;
 		const int no_close = 0;
@@ -288,11 +299,43 @@ learnsys(int rtable)
 	ctx.staticinterfaces = staticinterfaces;
 	ctx.interfaces = interfaces;
 
+	//
+	// Build an in-memory view of all the tunnels and routes on the
+	// system that appear to be part of the AMPR mesh.
+	//
 	discover(rtable, learn_interface_callback, learn_route_callback, &ctx);
+
+	//
+	// Find and remove redundant routes from in-memory view.
+	//
 	ipmapdo(tunnels, fix_overlaps, &ctx);
+
+	//
+	// Give reasonable expiration times for the routes we've discovered.
+	//
 	time_t expire = time(NULL);
 	expire += TIMEOUT;
 	ipmapdo(routes, set_expire_time, &expire);
+}
+
+static void
+cleanup(void)
+{
+	//
+	// Find all tunnels that serve no networks at all.
+	//
+	TunnelList *emptytunnel = NULL;
+	ipmapdo(tunnels, find_empty, &emptytunnel);
+
+	//
+	// Bring down the empty tunnels.
+	//
+	while (emptytunnel != NULL) {
+		TunnelList *next = emptytunnel->next;
+		collapse(emptytunnel->tunnel);
+		free(emptytunnel);
+		emptytunnel = next;
+	}
 }
 
 static void
@@ -454,6 +497,30 @@ fix_overlaps(uint32_t key, size_t keylen, void *tunnelp, void *arg)
 	return 0;
 }
 
+//
+// Find tunnels with no allocated routes.
+//
+static int
+find_empty(uint32_t key, size_t keylen, void *tunnelp, void *tlst_ptr)
+{
+	Tunnel *tunnel = tunnelp;
+	TunnelList **tlst = tlst_ptr;
+
+	if (tunnel->routes == NULL) {
+		assert(tunnel->nref == 0);
+		TunnelList *entry = malloc(sizeof(TunnelList));
+		if (entry == NULL)
+			fatal("malloc");
+		entry->tunnel = tunnel;
+		entry->next = *tlst;
+		*tlst = entry;
+	} else {
+		assert(tunnel->nref > 0);
+	}
+
+	return 0;
+}
+
 static int
 unlink_redundant(uint32_t key, size_t keylen, void *routep, void *arg)
 {
@@ -513,11 +580,11 @@ riptide(int sd)
 		fatal("socket error");
 	memset(&pkt, 0, sizeof(pkt));
 	if (parserippkt(packet, n, &pkt) < 0) {
-		error("packet parse error\n");
+		error("packet parse error");
 		return;
 	}
 	if (verifyripauth(&pkt, PASSWORD) < 0) {
-		error("packet authentication failed\n");
+		error("packet authentication failed");
 		return;
 	}
 	now = time(NULL);
@@ -525,7 +592,7 @@ riptide(int sd)
 		RIPResponse response;
 		memset(&response, 0, sizeof(response));
 		if (parseripresponse(&pkt, k, &response) < 0) {
-			notice("bad response, index %d\n", k);
+			notice("bad response, index %d", k);
 			continue;
 		}
 		ripresponse(&response, now);
@@ -572,8 +639,17 @@ ripresponse(RIPResponse *response, time_t now)
 		uptunnel(tunnel, routetable_create);
 		ipmapinsert(tunnels, response->nexthop, CIDR_HOST, tunnel);
 	}
-	route = ipmapnearest(routes, response->ipaddr, cidr);
-	if (route == NULL || route->subnetmask != response->subnetmask)
+	route = ipmapfind(routes, response->ipaddr, cidr);
+	if (route == NULL) {
+		Route *cover = ipmapnearest(routes, response->ipaddr, cidr);
+		if (cover != NULL && cover->tunnel == tunnel) {
+			char covernet[INET_ADDRSTRLEN];
+			ipaddrstr(cover->ipnet, covernet);
+			info("skipping network %s/%d because it is served "
+			    "by %s/%d", proute, cidr, covernet,
+			    netmask2cidr(cover->subnetmask));
+			return;
+		}
 		route = mkroute(
 		    response->ipaddr,
 		    response->subnetmask,
@@ -581,13 +657,12 @@ ripresponse(RIPResponse *response, time_t now)
 		ipmapinsert(routes, route->ipnet, cidr, route);
 		info("Added route %s/%zu -> %s", proute, cidr, gw);
 	}
-	// The route is new or moved to a different tunnel.
 	if (route->tunnel != tunnel) {
+		// The route is new or moved to a different tunnel.
 		if (route->tunnel == NULL)
 			addroute(route, tunnel, routetable_create);
 		else
 			chroute(route, tunnel, routetable_create);
-		unlinkroute(tunnel, route);
 		unlinkroute(route->tunnel, route);
 		collapse(route->tunnel);
 		linkroute(tunnel, route);
@@ -735,9 +810,8 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	assert(datum == route);
 	tunnel = route->tunnel;
 	assert(tunnel != NULL);
+	rmroute(route, routetable_create);
 	unlinkroute(tunnel, route);
-	if (tunnel->nref)
-		rmroute(route, routetable_create);
 	collapse(tunnel);
 
 	return 0;
