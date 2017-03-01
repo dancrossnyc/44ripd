@@ -573,7 +573,7 @@ ripresponse(RIPResponse *response, time_t now)
 		ipmapinsert(tunnels, response->nexthop, CIDR_HOST, tunnel);
 	}
 	route = ipmapnearest(routes, response->ipaddr, cidr);
-	if (route == NULL || route->tunnel->outer_remote != response->nexthop) {
+	if (route == NULL || route->subnetmask != response->subnetmask)
 		route = mkroute(
 		    response->ipaddr,
 		    response->subnetmask,
@@ -777,23 +777,21 @@ dump_tunnel(uint32_t key, size_t keylen, void *tunnelp, void *arg)
 	fprintf(out, "Tunnel interface %s:\n"
 	              "\tOuter %s -> %s\n"
 	              "\tInner %s -> %s\n"
-	              "\tRoutes:\n",
+	              "\tRouted networks:\n",
 	    tunnel->ifname, outer_local, outer_remote, inner_local,
 	    inner_remote);
 
 	Route *route;
 	for (route = tunnel->routes; route; route = route->rnext) {
 		char net[INET_ADDRSTRLEN];
-		char gateway[INET_ADDRSTRLEN];
 		size_t cidr;
 
 		assert(route->tunnel == tunnel);
 
 		ipaddrstr(route->ipnet, net);
 		cidr = netmask2cidr(route->subnetmask);
-		ipaddrstr(route->gateway, gateway);
 
-		fprintf(out, "\t\t%s/%d -> %s\n", net, cidr, gateway);
+		fprintf(out, "\t\t%s/%d\n", net, cidr);
 	}
 
 	return 0;
@@ -818,7 +816,6 @@ dump_all(FILE *out)
 {
 	fputs("Acceptance policy:\n", out);
 	ipmapdotopdown(acceptableroutes, dump_accept_reject, out);
-	fputs("Tunnel interfaces and routes:\n", out);
 	ipmapdo(tunnels, dump_tunnel, out);
 }
 

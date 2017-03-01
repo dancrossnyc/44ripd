@@ -8,7 +8,7 @@ PROG=			44ripd
 TESTS=			testbitvec testipmapfind testipmapnearest \
 			testisvalidnetmask testnetmask2cidr testrevbits
 DTESTS=			testipmapinsert
-TOBJS=			lib.o freebsd/sys.o compat.o
+TOBJS=			lib.o freebsd/sys.o compat.o log.o
 LIBS=		
 
 all:			$(PROG)
