@@ -1,0 +1,55 @@
+.Dd January 28, 2017
+.Dt 44RIPD 8
+.Os
+.Sh NAME
+.Nm 44ripd
+.Nd AMPR route update daemon
+.Sh SYNOPSIS
+.Nm
+.Op Fl d
+.Op Fl T Ar routetable
+.Op Fl L Ar localip
+.Op Fl I Ar ignoreroute
+.Op Fl s Ar ifnum
+.Sh DESCRIPTION
+The
+.Nm
+daemon handles route and tunnel maintenance for the AMPR
+amateur radio network (IPv4 44/8: http://www.ampr.org)
+using a modified version of the RIPv2 protocol (RFC 2453).
+
+The AMPR network is a mesh wherin each site sets up an
+IPENCAP tunnel to (almost) every other site. (As of 2017
+there are 594 disparate AMPR networks).
+
+The daemon listens on a multicast socket for UDP datagrams
+directed to the RIP port. It discards packets that are not
+valid, authenticated RIP packets (though authentication is
+simply string comparison against a plaintext password: it is
+not particularly strong and could be trivially broken). It
+maintains an internal copy of the AMPRNet routing table as
+well as a set of active tunnels.
+
+After processing a RIP packet, the daemon walks through the
+routing table, looking for routes to expire. If a route
+expires it is noted for removal from the table. Expiration
+time is much greater than the expected interval between
+RIP broadcasts.
+
+Routes keep a reference to a tunnel. When a route is added
+that refers to an non-existent tunnel, the tunnel is created
+and set up. If a route referring to a tunnel is removed or
+changed to a different tunnel, the tunnel's reference count
+is decremented. If a tunnel's reference count drops to zero,
+it is torn down and removed.
+
+Each tunnel corresponds to a virtual IP encapsulation
+interface; see gif(4) for details.  The daemon dynamically
+creates and destroys these interfaces as required.  A bitmap
+of active interfaces is kept and the lowest unused interface
+number is always allocated when a new tunnel is created.
+.Sh SEE ALSO
+.Xr ifconfig 8 ,
+.Xr route 8
+.Sh AUTHORS
+.An "Dan Cross"
