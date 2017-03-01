@@ -6,8 +6,23 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "dat.h"
-#include "fns.h"
+#include "lib.h"
+#include "rip.h"
+
+static uint32_t readnet32(const octet data[static 4]);
+static uint16_t readnet16(const octet data[static 2]);
+
+static uint32_t
+readnet32(const octet data[static 4])
+{
+	return data[0] << 24 | data[1] << 16 | data[2] << 8 | data[3];
+}
+
+static uint16_t
+readnet16(const octet data[static 2])
+{
+	return data[0] << 8 | data[1];
+}
 
 int
 parserippkt(const octet *restrict data, size_t len, RIPPacket *restrict packet)

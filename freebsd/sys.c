@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <sys/sockio.h>
 #include <sys/ioctl.h>
+#include <sys/sysctl.h>
 #include <net/if.h>
 #include <net/if_dl.h>
 #include <net/if_var.h>
@@ -15,21 +16,160 @@
 #include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <ifaddrs.h>
 #include <limits.h>
 #include <stdalign.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "dat.h"
-#include "fns.h"
+#include "lib.h"
+#include "log.h"
+#include "sys.h"
 
 static int ctlfd = -1;
 static int rtfd = -1;
 static int rtfd_rtable = -1;
 
 static uint32_t hostmask;
+
+void
+discoverifs(int rtable, if_discovered_thunk thunk, void *arg)
+{
+	struct ifaddrs *ifa;
+	int tmpctlfd;
+
+	tmpctlfd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (tmpctlfd < 0)
+		fatale("ctl socket");
+
+	if (getifaddrs(&ifa) != 0)
+		fatale("getifaddrs");
+
+	for (; ifa != NULL; ifa = ifa->ifa_next) {
+		struct ifreq ifr;
+		int gifnum;
+		uint32_t outer_local, outer_remote;
+
+		if ((ifa->ifa_flags & IFF_UP) == 0)
+			continue;
+		if (sscanf(ifa->ifa_name, "gif%d", &gifnum) != 1)
+			continue;
+		if (ifa->ifa_addr->sa_family != AF_INET)
+			continue;
+		if (ifa->ifa_dstaddr->sa_family != AF_INET)
+			continue;
+		strlcpy(ifr.ifr_name, ifa->ifa_name, sizeof(ifr.ifr_name));
+		if (ioctl(tmpctlfd, SIOCGIFPSRCADDR, &ifr) < 0)
+			fatal("get %s outer src addr: %m", ifa->ifa_name);
+		if (ifr.ifr_addr.sa_family != AF_INET)
+			continue;
+		outer_local = ntohl(
+		    ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr.s_addr);
+		if (ioctl(tmpctlfd, SIOCGIFPDSTADDR, &ifr) < 0)
+			fatal("get %s outer dst addr: %m", ifa->ifa_name);
+		if (ifr.ifr_addr.sa_family != AF_INET)
+			continue;
+		outer_remote = ntohl(
+		    ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr.s_addr);
+		if (ioctl(tmpctlfd, SIOCGIFFIB, &ifr) < 0)
+			fatal("get %s fib: %m", ifa->ifa_name);
+		if (ifr.ifr_fib != rtable)
+			continue;
+		uint32_t inner_local = ntohl(
+		    ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr.s_addr
+		);
+		uint32_t inner_remote = ntohl(
+		    ((struct sockaddr_in *)ifa->ifa_dstaddr)->sin_addr.s_addr
+		);
+
+		thunk(ifa->ifa_name, gifnum, outer_local, outer_remote,
+		    inner_local, inner_remote, arg);
+	}
+
+	freeifaddrs(ifa);
+	close(tmpctlfd);
+}
+
+void
+discoverrts(int rtable, rt_discovered_thunk thunk, void *arg)
+{
+	int mib[7];
+	const size_t mib_depth = sizeof(mib) / sizeof(mib[0]);
+
+	mib[0] = CTL_NET;
+	mib[1] = PF_ROUTE;
+	mib[2] = 0;
+	mib[3] = AF_INET;
+	mib[4] = NET_RT_DUMP;
+	mib[5] = 0;
+	mib[6] = rtable;
+
+	size_t rtbufsize;
+
+	if (sysctl(mib, mib_depth, NULL, &rtbufsize, NULL, 0) < 0)
+		fatale("sysctl: net.route sizing");
+	
+	char *rtbuf = malloc(rtbufsize);
+	if (rtbuf == NULL)
+		fatal("malloc net.route sysctl");
+
+	if (sysctl(mib, mib_depth, rtbuf, &rtbufsize, NULL, 0) < 0)
+		fatale("sysctl: net.route");
+
+	char *hdr;
+	struct rt_msghdr *rtm;
+
+	for (hdr = rtbuf; hdr < rtbuf + rtbufsize; hdr += rtm->rtm_msglen) {
+		char ifname[MAX_TUN_IFNAME];
+		uint32_t net, netmask, dest;
+		int isaddr;
+
+		rtm = (struct rt_msghdr *) hdr;
+		if (rtm->rtm_version != RTM_VERSION)
+			fatal("Route socket version mismatch");
+		if (((~rtm->rtm_addrs) & (RTA_DST|RTA_NETMASK|RTA_GATEWAY))!=0)
+			continue;
+		struct sockaddr *netaddr = (struct sockaddr *)(rtm + 1);
+		if (netaddr->sa_family != AF_INET)
+			continue;
+		struct sockaddr_in *sin = (struct sockaddr_in *)netaddr;
+		net = ntohl(sin->sin_addr.s_addr);
+		struct sockaddr *gwaddr = (struct sockaddr *)
+		    (((char *)netaddr) + netaddr->sa_len);
+		if (gwaddr->sa_family == AF_LINK) {
+			struct sockaddr_dl *sdl = (struct sockaddr_dl *)gwaddr;
+			if (sdl->sdl_nlen == 0)
+				// Nondescript "link" route. Not needed.
+				continue;
+			isaddr = 0;
+			if (sdl->sdl_nlen > sizeof(ifname)-1)
+				fatal("interface name too big");
+			memcpy(ifname, sdl->sdl_data, sdl->sdl_nlen);
+			ifname[sdl->sdl_nlen] = '\0';
+		} else if (gwaddr->sa_family == AF_INET) {
+			struct sockaddr_in *sin = (struct sockaddr_in *)gwaddr;
+			isaddr = 1;
+			dest = ntohl(sin->sin_addr.s_addr);
+		} else {
+			// Unknown gateway address family.
+			continue;
+		}
+		struct sockaddr *maskaddr = (struct sockaddr *)
+		    (((char *)gwaddr) + gwaddr->sa_len);
+		if (maskaddr->sa_family != AF_INET)
+			continue;
+		sin = (struct sockaddr_in *)maskaddr;
+		netmask = ntohl(sin->sin_addr.s_addr);
+
+		thunk(net, netmask, isaddr, dest, ifname, arg);
+	}
+
+	free(rtbuf);
+}
 
 void
 initsys(int rtable)
@@ -182,6 +322,8 @@ uptunnel(Tunnel *tunnel, int rtable)
 		    tunnel->ifname, local, remote);
 	}
 
+	ifr.ifr_fib = rtable;
+
 #ifdef SIOCSTUNFIB
 	//
 	// FreeBSD 10.2 introduced the SIOSTUNFIB ioctl, which allows
@@ -191,7 +333,6 @@ uptunnel(Tunnel *tunnel, int rtable)
 	// Before FreeBSD 10.2, the only way to set this value was to
 	// set the FIB on the thread which created the interface.
 	// Set the tunnnel routing domain.
-	ifr.ifr_fib = rtable;
 	if (ioctl(ctlfd, SIOCSTUNFIB, &ifr) < 0)
 		fatal("cannot set tunnel routing table %s: %m",
 		    tunnel->ifname);

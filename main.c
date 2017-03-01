@@ -42,6 +42,7 @@
 
 #include <assert.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,23 +51,49 @@
 #include <unistd.h>
 
 #include "dat.h"
-#include "fns.h"
+#include "lib.h"
+#include "log.h"
+#include "rip.h"
+#include "sys.h"
 
-int init(int argc, char *argv[]);
-unsigned int strnum(const char *restrict str);
-void riptide(int sd);
-void ripresponse(RIPResponse *response, time_t now);
-Route *mkroute(uint32_t ipnet, uint32_t subnetmask, uint32_t gateway);
-Tunnel *mktunnel(uint32_t outer_local, uint32_t outer_remote,
+static int init(int argc, char *argv[]);
+static void learnsys(int rtable);
+static void learn_interface_callback(const char *name, int num,
+    uint32_t outer_local, uint32_t outer_remote, uint32_t inner_local,
+    uint32_t inner_remote, void *arg);
+static void learn_route_callback(uint32_t ipnet, uint32_t mask,
+    int isaddr, uint32_t dstaddr, const char *dstif, void *arg);
+static unsigned int strnum(const char *restrict str);
+static void riptide(int sd);
+static void ripresponse(RIPResponse *response, time_t now);
+static Route *mkroute(uint32_t ipnet, uint32_t subnetmask, uint32_t gateway);
+static Tunnel *mktunnel(uint32_t outer_local, uint32_t outer_remote,
     uint32_t inner_local, uint32_t inner_remote);
-void alloctunif(Tunnel *tunnel, Bitvec *interfaces);
-void unlinkroute(Tunnel *tunnel, Route *route);
-void linkroute(Tunnel *tunnel, Route *route);
-void walkexpired(time_t now);
-void destroy(uint32_t key, size_t keylen, void *routep, void *unused);
-void collapse(Tunnel *tunnel);
-void expire(uint32_t key, size_t keylen, void *routep, void *statep);
-void usage(const char *restrict prog);
+static void alloctunif(Tunnel *tunnel, Bitvec *interfaces);
+static void unlinkroute(Tunnel *tunnel, Route *route);
+static void linkroute(Tunnel *tunnel, Route *route);
+static void walkexpired(time_t now);
+static int destroy(uint32_t key, size_t keylen, void *routep, void *unused);
+static void collapse(Tunnel *tunnel);
+static int expire(uint32_t key, size_t keylen, void *routep, void *statep);
+static void usage(const char *restrict prog);
+static int tunnelfindbyname(uint32_t key, uint32_t keylen, void *datum,
+   void *arg);
+static int tunnelfindbydest(uint32_t key, uint32_t keylen, void *datum,
+   void *arg);
+
+typedef struct TunnelFindByNameParams TunnelFindByNameParams;
+typedef struct TunnelFindByDestParams TunnelFindByDestParams;
+
+struct TunnelFindByNameParams {
+	const char *name;
+	Tunnel *tunnel;
+};
+
+struct TunnelFindByDestParams {
+	uint32_t destaddr;
+	Tunnel *tunnel;
+};
 
 enum {
 	CIDR_HOST = 32,
@@ -193,18 +220,17 @@ init(int argc, char *argv[])
 	local_outer_ip = argv[0];
 	local_inner_ip = argv[1];
 
-	initsys(routetable_create);
-
-	if (!read_from_file)
-		sd = initsock(RIPV2_GROUP, RIPV2_PORT, routetable_bind);
-
-	memset(&addr, 0, sizeof(addr));
-
 	inet_pton(AF_INET, local_outer_ip, &addr);
 	local_outer_addr = ntohl(addr.s_addr);
 
 	inet_pton(AF_INET, local_inner_ip, &addr);
 	local_inner_addr = ntohl(addr.s_addr);
+
+	learnsys(routetable_create);
+	initsys(routetable_create);
+
+	if (!read_from_file)
+		sd = initsock(RIPV2_GROUP, RIPV2_PORT, routetable_bind);
 
 	initlog();
 	if (daemonize) {
@@ -219,6 +245,122 @@ init(int argc, char *argv[])
 enum {
 	MAX_NUM = (1 << 20),
 };
+
+static void
+learnsys(int rtable)
+{
+	discoverifs(rtable, learn_interface_callback, NULL);
+	discoverrts(rtable, learn_route_callback, NULL);
+}
+
+static void
+learn_interface_callback(const char *name, int num,
+    uint32_t outer_local, uint32_t outer_remote, uint32_t inner_local,
+    uint32_t inner_remote, void *arg)
+{
+	if (bitget(staticinterfaces, num))
+		return;
+
+	assert(bitget(interfaces, num) == 0);
+
+	void *accept = ipmapnearest(acceptableroutes, inner_remote, CIDR_HOST);
+	if (accept != ACCEPT)
+		fatal("interface %s has unacceptable destination", name);
+
+	Tunnel *tunnel = mktunnel(outer_local, outer_remote, inner_local,
+	    inner_remote);
+
+	tunnel->ifnum = num;
+	strncpy(tunnel->ifname, name, sizeof(tunnel->ifname)-1);
+
+	if (ipmapinsert(tunnels, outer_remote, CIDR_HOST, tunnel) != tunnel)
+		fatal("interface %s duplicates another interface", name);
+	bitset(interfaces, num);
+}
+
+static void
+learn_route_callback(uint32_t ipnet, uint32_t mask,
+    int isaddr, uint32_t destaddr, const char *destif, void *unused)
+{
+	char net[INET_ADDRSTRLEN];
+	Tunnel *tunnel;
+
+	(void)unused;
+
+	int cidr = netmask2cidr(mask);
+	if (cidr == -1) {
+		ipaddrstr(ipnet, net);
+		fatal("unusual netmask found in routed network %s/%08" PRIx32,
+		    mask);
+	}
+
+	if (isaddr) {
+		TunnelFindByDestParams params;
+		params.destaddr = destaddr;
+		params.tunnel = NULL;
+		ipmapdo(tunnels, tunnelfindbydest, &params);
+		tunnel = params.tunnel;
+	} else {
+		TunnelFindByNameParams params;
+		params.name = destif;
+		params.tunnel = NULL;
+		ipmapdo(tunnels, tunnelfindbyname, &params);
+		tunnel = params.tunnel;
+	}
+
+	void *accept = ipmapnearest(acceptableroutes, ipnet, cidr);
+
+	if (tunnel == NULL) {
+		if (accept == ACCEPT) {
+			ipaddrstr(ipnet, net);
+			fatal("acceptable network %s/%d routed to "
+			    "unknown destination", net, cidr);
+		}
+		return;
+	}
+	if (accept != ACCEPT) {
+		ipaddrstr(ipnet, net);
+		fatal("unacceptable network %s/%d found with managed tunnel",
+		    net, cidr);
+	}
+	
+	Route *route = mkroute(ipnet, mask, tunnel->outer_remote);
+
+	if (ipmapinsert(routes, ipnet, cidr, route) != route) {
+		ipaddrstr(ipnet, net);
+		fatal("duplicate route for %s/%d detected", net, cidr);
+	}
+
+	linkroute(tunnel, route);
+}
+
+static int
+tunnelfindbydest(uint32_t key, uint32_t keylen, void *datum, void *arg)
+{
+	Tunnel *tunnel = datum;
+	TunnelFindByDestParams *params = arg;
+
+	if (tunnel->inner_remote == params->destaddr) {
+		params->tunnel = tunnel;
+		return 1;
+	}
+
+	return 0;
+}
+
+static int
+tunnelfindbyname(uint32_t key, uint32_t keylen, void *datum, void *arg)
+{
+	Tunnel *tunnel = datum;
+	TunnelFindByNameParams *params = arg;
+
+	if (strcmp(tunnel->ifname, params->name) == 0) {
+		params->tunnel = tunnel;
+		return 1;
+	}
+
+	return 0;
+}
 
 unsigned int
 strnum(const char *restrict str)
@@ -440,7 +582,7 @@ walkexpired(time_t now)
 	}
 }
 
-void
+int
 expire(uint32_t key, size_t keylen, void *routep, void *statep)
 {
 	Route *route = routep;
@@ -449,7 +591,7 @@ expire(uint32_t key, size_t keylen, void *routep, void *statep)
 	char proute[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
 
 	if (route->expires > state->now)
-		return;
+		return 0;
 
 	if (state->deleting == NULL)
 		state->deleting = mkipmap(); 
@@ -459,9 +601,11 @@ expire(uint32_t key, size_t keylen, void *routep, void *statep)
 	ipaddrstr(route->gateway, gw);
 	info("Expiring route %s/%zu -> %s", proute, cidr, gw);
 	ipmapinsert(state->deleting, key, keylen, route);
+
+	return 0;
 }
 
-void
+int
 destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 {
 	Route *route = routep;
@@ -472,7 +616,7 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 
 	(void)unused;
 	if (route == NULL)
-		return;
+		return 0;
 	cidr = netmask2cidr(route->subnetmask);
 	assert(cidr == keylen);
 	ipaddrstr(route->ipnet, proute);
@@ -485,6 +629,8 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	unlinkroute(tunnel, route);
 	rmroute(route, routetable_create);
 	collapse(tunnel);
+
+	return 0;
 }
 
 void

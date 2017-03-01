@@ -5,6 +5,8 @@
 
 #ifdef USE_COMPAT
 
+#include "lib.h"
+
 #define SIZE_T_MAX ~(size_t)0
 #define SQRT_MAX (1 << (sizeof(size_t)*8/4))
 
