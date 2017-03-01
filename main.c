@@ -73,7 +73,6 @@ enum {
 	TIMEOUT = 7*24*60*60,	// 7 days
 };
 
-const char *DEFAULT_LOCAL_ADDRESS = "23.30.150.141";
 const char *RIPV2_GROUP = "224.0.0.9";
 const char *PASSWORD = "pLaInTeXtpAsSwD";
 
@@ -115,7 +114,7 @@ init(int argc, char *argv[])
 	interfaces = mkbitvec();
 	staticinterfaces = mkbitvec();
 	routetable = DEFAULT_ROUTE_TABLE;
-	localip = DEFAULT_LOCAL_ADDRESS;
+	localip = NULL;
 	routes = mkipmap();
 	tunnels = mkipmap();
 	while ((ch = getopt(argc, argv, "dT:L:I:s:")) != -1) {
@@ -125,9 +124,6 @@ init(int argc, char *argv[])
 			break;
 		case 'T':
 			routetable = strnum(optarg);
-			break;
-		case 'L':
-			localip = optarg;
 			break;
 		case 'I': {
 			static void *IGNORE = (void *)0x10;	// Arbitrary.
@@ -155,17 +151,26 @@ init(int argc, char *argv[])
 			usage(prog);
 		}
 	}
+
+	argc -= optind;
+	argv += optind;
+
+	if (argc < 1)
+		usage(prog);
+
+	localip = argv[0];
+
 	initsys(routetable);
 	sd = initsock(RIPV2_GROUP, RIPV2_PORT, routetable);
 	memset(&addr, 0, sizeof(addr));
 	inet_pton(AF_INET, localip, &addr);
-	localaddr = addr.s_addr;
+	localaddr = ntohl(addr.s_addr);
 
 	initlog();
 	if (daemonize) {
-		const int chdiryes = 1;
-		const int closeyes = 1;
-		daemon(chdiryes, closeyes);
+		const int no_chdir = 0;
+		const int no_close = 0;
+		daemon(no_chdir, no_close);
 	}
 
 	return sd;
@@ -446,8 +451,8 @@ void
 usage(const char *restrict prog)
 {
 	fprintf(stderr,
-	    "Usage: %s [ -d ] [ -T rtable ] [ -L local_ip ] "
-	        "[ -I ignore ] [ -s static_ifnum ]\n",
+	    "Usage: %s [ -d ] [ -T <rtable> ] [ -I <ignorespec> ] "
+	        "[ -s <static_ifnum> ] <localip>\n",
 	    prog);
 	exit(EXIT_FAILURE);
 }
