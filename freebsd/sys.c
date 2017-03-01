@@ -30,11 +30,23 @@
 #include "log.h"
 #include "sys.h"
 
+typedef struct iface_info iface_info;
+
+struct iface_info {
+	char ifname[MAX_TUN_IFNAME];
+	int gifnum;    // Tunnel instance number
+	u_short index; // OS identifier
+	iface_info *next;
+};
+
 static int ctlfd = -1;
 static int rtfd = -1;
 static int rtfd_rtable = -1;
 
 static uint32_t hostmask;
+
+static void discoverroute(iface_info *ifaces, int rtable,
+    struct rt_msghdr *rtm, rt_discovered_thunk thunk, void *arg);
 
 static inline size_t
 sa_roundup(size_t len)
@@ -45,18 +57,79 @@ sa_roundup(size_t len)
 	return len;
 }
 
-void
-discoverifs(int rtable, if_discovered_thunk thunk, void *arg)
+//
+// Get the next available sockaddr structure from a route message.
+//
+static struct sockaddr *
+getsa(void **ptr, int rtm_addrs, int addrflag)
+{
+	//
+	// Is the requested route component in the route message
+	// provided?
+	//
+	if (!(rtm_addrs & addrflag))
+		return NULL;
+
+	struct sockaddr *sa = *ptr;
+	if (sa->sa_len == 0)
+		// There are no further addresses in this message.
+		return NULL;
+
+	//
+	// The requested component is present. Save it and advance
+	// the parsing pointer.
+	//
+	char *next = (char *)*ptr;
+	next += sa_roundup(sa->sa_len);
+
+	*ptr = next;
+	return sa;
+}
+
+static int
+getifnamefromsa(struct sockaddr *sa, char *name, size_t nameln)
+{
+	assert(sa->sa_family == AF_LINK);
+	struct sockaddr_dl *sdl = (struct sockaddr_dl *)sa;
+	if (sdl->sdl_nlen == 0)
+		return -1;
+	if (sdl->sdl_nlen >= nameln)
+		return -2;
+	memcpy(name, sdl->sdl_data, sdl->sdl_nlen);
+	name[sdl->sdl_nlen] = '\0';
+	return 0;
+}
+
+static u_short
+getifindexfromsa(struct sockaddr *sa)
+{
+	assert(sa->sa_family == AF_LINK);
+	struct sockaddr_dl *sdl = (struct sockaddr_dl *)sa;
+	return sdl->sdl_index;
+}
+
+static char *
+lookupifbyindex(iface_info *head, u_short index)
+{
+	for (;head != NULL; head = head->next)
+		if (head->index == index)
+			return head->ifname;
+	return NULL;
+}
+
+static void
+discoverifs(iface_info *gifinterfaces, int rtable, if_discovered_thunk thunk,
+    void *arg)
 {
 	struct ifaddrs *ifa;
 	int tmpctlfd;
 
 	tmpctlfd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (tmpctlfd < 0)
-		fatale("ctl socket");
+		fatal_err("ctl socket");
 
 	if (getifaddrs(&ifa) != 0)
-		fatale("getifaddrs");
+		fatal_err("getifaddrs");
 
 	for (; ifa != NULL; ifa = ifa->ifa_next) {
 		struct ifreq ifr;
@@ -67,6 +140,22 @@ discoverifs(int rtable, if_discovered_thunk thunk, void *arg)
 			continue;
 		if (sscanf(ifa->ifa_name, "gif%d", &gifnum) != 1)
 			continue;
+		if (ifa->ifa_addr->sa_family == AF_LINK) {
+			iface_info *ifi = malloc(sizeof(iface_info));
+			if (ifi == NULL)
+				fatal("malloc");
+			int res = getifnamefromsa(ifa->ifa_addr, ifi->ifname,
+			    sizeof(ifi->ifname));
+			ifi->index = getifindexfromsa(ifa->ifa_addr);
+			if (res != 0 || ifi->index == 0) {
+				free(ifi);
+				continue;
+			}
+			ifi->gifnum = gifnum;
+			ifi->next = gifinterfaces;
+			gifinterfaces = ifi;
+			continue;
+		}
 		if (ifa->ifa_addr->sa_family != AF_INET)
 			continue;
 		if (ifa->ifa_dstaddr->sa_family != AF_INET)
@@ -103,8 +192,9 @@ discoverifs(int rtable, if_discovered_thunk thunk, void *arg)
 	close(tmpctlfd);
 }
 
-void
-discoverrts(int rtable, rt_discovered_thunk thunk, void *arg)
+static void
+discoverrts(iface_info *gifinterfaces, int rtable, rt_discovered_thunk thunk,
+    void *arg)
 {
 	int mib[7];
 	const size_t mib_depth = sizeof(mib) / sizeof(mib[0]);
@@ -120,82 +210,200 @@ discoverrts(int rtable, rt_discovered_thunk thunk, void *arg)
 	size_t rtbufsize;
 
 	if (sysctl(mib, mib_depth, NULL, &rtbufsize, NULL, 0) < 0)
-		fatale("sysctl: net.route sizing");
+		fatal_err("sysctl: net.route sizing");
 	
 	char *rtbuf = malloc(rtbufsize);
 	if (rtbuf == NULL)
 		fatal("malloc net.route sysctl");
 
 	if (sysctl(mib, mib_depth, rtbuf, &rtbufsize, NULL, 0) < 0)
-		fatale("sysctl: net.route");
+		fatal_err("sysctl: net.route");
 
 	char *hdr;
 	struct rt_msghdr *rtm;
 
 	for (hdr = rtbuf; hdr < rtbuf + rtbufsize; hdr += rtm->rtm_msglen) {
-		char ifname[MAX_TUN_IFNAME];
-		uint32_t net, netmask, dest;
-		int isaddr;
-
 		rtm = (struct rt_msghdr *) hdr;
-		if (rtm->rtm_version != RTM_VERSION)
-			fatal("Route socket version mismatch");
-		if (((~rtm->rtm_addrs) & (RTA_DST|RTA_NETMASK|RTA_GATEWAY))!=0)
-			continue;
-		struct sockaddr *netaddr = (struct sockaddr *)(rtm + 1);
-		if (netaddr->sa_family != AF_INET)
-			continue;
-		struct sockaddr_in *sin = (struct sockaddr_in *)netaddr;
-		net = ntohl(sin->sin_addr.s_addr);
-		struct sockaddr *gwaddr = (struct sockaddr *)
-		    (((char *)netaddr) + sa_roundup(netaddr->sa_len));
-		if (gwaddr->sa_family == AF_LINK) {
-			struct sockaddr_dl *sdl = (struct sockaddr_dl *)gwaddr;
-			if (sdl->sdl_nlen == 0)
-				// Nondescript "link" route. Not needed.
-				continue;
-			isaddr = 0;
-			dest = 0;
-			if (sdl->sdl_nlen > sizeof(ifname)-1)
-				fatal("interface name too big");
-			memcpy(ifname, sdl->sdl_data, sdl->sdl_nlen);
-			ifname[sdl->sdl_nlen] = '\0';
-		} else if (gwaddr->sa_family == AF_INET) {
-			struct sockaddr_in *sin = (struct sockaddr_in *)gwaddr;
-			isaddr = 1;
-			dest = ntohl(sin->sin_addr.s_addr);
-		} else {
-			// Unknown gateway address family.
-			continue;
-		}
-		struct sockaddr *maskaddr = (struct sockaddr *)
-		    (((char *)gwaddr) + sa_roundup(gwaddr->sa_len));
-		if (maskaddr->sa_len == 0) {
-			netmask = 0;
-		} else {
-			sin = (struct sockaddr_in *)maskaddr;
-			netmask = ntohl(sin->sin_addr.s_addr);
-		}
-
-		thunk(net, netmask, isaddr, dest, ifname, arg);
+		discoverroute(gifinterfaces, rtable, rtm, thunk, arg);
 	}
 
 	free(rtbuf);
 }
 
+static void
+discoverroute(iface_info *gifinterfaces, int rtable, struct rt_msghdr *rtm,
+    rt_discovered_thunk thunk, void *arg)
+{
+	char ifname[MAX_TUN_IFNAME], *name=NULL;
+	uint32_t net, netmask, dest;
+	int isaddr;
+
+	if (rtm->rtm_version != RTM_VERSION)
+		fatal("Route socket version mismatch");
+
+	void *ptr = (rtm + 1);
+
+	struct sockaddr *netaddr  = getsa(&ptr, rtm->rtm_addrs, RTA_DST);
+	struct sockaddr *gwaddr   = getsa(&ptr, rtm->rtm_addrs, RTA_GATEWAY);
+	struct sockaddr *maskaddr = getsa(&ptr, rtm->rtm_addrs, RTA_NETMASK);
+	(void)                      getsa(&ptr, rtm->rtm_addrs, RTA_GENMASK);
+	struct sockaddr *ifpaddr  = getsa(&ptr, rtm->rtm_addrs, RTA_IFP);
+
+	// We're only interested in routes to IPv4 addresses.
+	if (netaddr == NULL || netaddr->sa_family != AF_INET)
+		return;
+	// Routed network is an IPv4 network. Get its address.
+	struct sockaddr_in *sin = (struct sockaddr_in *)netaddr;
+	net = ntohl(sin->sin_addr.s_addr);
+
+	//
+	// Next, check the route gateway. It must be one of two
+	// things: another IP address directly reachable from this
+	// system, or a network interface attached to this system.
+	//
+	if (gwaddr == NULL)
+		// No gateway. We can't possibly care about this route.
+		return;
+
+	if (gwaddr->sa_family == AF_LINK) {
+		//
+		// Gateway appears to be a network interface. Network
+		// interfaces as gateways can be confusing. In the BSD
+		// networking stack it appears that there are several
+		// interface addresses involved in a route. Ultimately,
+		// we're interested in the final destination interface,
+		// not the intermediate interfaces used along the way.
+		//
+		// If there's an RTA_IFP address in this packet, it should
+		// be consulted first as it has the best representation
+		// of the final destination. Otherwise we'll use the gateway
+		// interface listed in the RTA_GATEWAY address.
+		//
+		struct sockaddr *ifaddr;
+
+		if (ifpaddr != NULL && ifpaddr->sa_family == AF_LINK) {
+			//
+			// There's an IFP address. Use its interface
+			// as the final route destination.
+			//
+			ifaddr = ifpaddr;
+		} else {
+			//
+			// There's no IFP address, use this gateway
+			// address.
+			//
+			ifaddr = gwaddr;
+		}
+
+		//
+		// Now retrieve the interface's name if directly provided,
+		// If its name is not directly listed then its OS identifier
+		// (or "index") should be available instead.
+		//
+		int res = getifnamefromsa(ifaddr, ifname, sizeof(ifname));
+		if (res == -2) {
+			//
+			// Name is present, but there's not enough room
+			// to store the name in the provided buffer.
+			//
+			fatal("interface name too big");
+			return;
+		} else if (res == -1) {
+			//
+			// There's no name in the address, just an
+			// OS interface index (unique ID).
+			//
+			// We should have a list of all valid tunnel
+			// interfaces built up from the interface
+			// discovery phase. Consult it to see if we
+			// have a name stored for this index.
+			//
+			u_short index = getifindexfromsa(gwaddr);
+			name = lookupifbyindex(gifinterfaces, index);
+			if (name == NULL)
+				//
+				// Nope. No name available. We probably
+				// don't care about this route.
+				//
+				return;
+		} else {
+			//
+			// There was a name available. Use it.
+			//
+			name = ifname;
+		}
+		//
+		// We've found a gateway, but it's not an Internet
+		// host. Mark it as such and set the IPv4 address to
+		// zero just to make sure no one uses it.
+		//
+		isaddr = 0;
+		dest = 0;
+	} else if (gwaddr->sa_family == AF_INET) {
+		//
+		// Gateway is another IPv4 address.
+		//
+		struct sockaddr_in *sin = (struct sockaddr_in *)gwaddr;
+		isaddr = 1;
+		dest = ntohl(sin->sin_addr.s_addr);
+	} else {
+		// Unknown gateway address family.
+		return;
+	}
+
+	//
+	// Get the destination network's netmask. If the
+	// destination is marked as a host then make the netmask
+	// reflect that.
+	//
+	if (rtm->rtm_flags & RTF_HOST) {
+		netmask = hostmask;
+	} else if (maskaddr == NULL) {
+		// This must be the route table's default route.
+		netmask = 0;
+	} else {
+		sin = (struct sockaddr_in *)maskaddr;
+		netmask = ntohl(sin->sin_addr.s_addr);
+	}
+
+	thunk(net, netmask, isaddr, dest, name, arg);
+}
+
+void
+discover(int rtable, if_discovered_thunk ifthunk, rt_discovered_thunk rtthunk,
+    void *arg)
+{
+	iface_info *interfaces = NULL;
+
+	// Create prototype tunnel netmask.
+	struct in_addr addr;
+	memset(&addr, 0, sizeof(addr));
+	inet_pton(AF_INET, "255.255.255.255", &addr);
+	hostmask = addr.s_addr;
+
+	discoverifs(interfaces, rtable, ifthunk, arg);
+	discoverrts(interfaces, rtable, rtthunk, arg);
+
+	iface_info *head = interfaces;
+
+	while (head != NULL) {
+		iface_info *next = head->next;
+		free(head);
+		head = next;
+	}
+}
+
 void
 initsys(int rtable)
 {
-	struct in_addr addr;
-
 	ctlfd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (ctlfd < 0)
-		fatale("ctl socket");
+		fatal_err("ctl socket");
 	rtfd = socket(PF_ROUTE, SOCK_RAW, AF_INET);
 	if (rtfd < 0)
-		fatale("route socket");
+		fatal_err("route socket");
 	if (shutdown(rtfd, SHUT_RD) < 0)
-		fatale("route shutdown read");
+		fatal_err("route shutdown read");
 
 	//
 	// FreeBSD doesn't have the ability to specify which route table
@@ -207,7 +415,7 @@ initsys(int rtable)
 	//
 	if (setsockopt(rtfd, SOL_SOCKET, SO_SETFIB, &rtable,
 	               sizeof(rtable)) < 0)
-		fatale("setsockopt rtfd SO_SETFIB");
+		fatal_err("setsockopt rtfd SO_SETFIB");
 
 	//
 	// Save the route table that we set so that we can check that
@@ -218,6 +426,7 @@ initsys(int rtable)
 	rtfd_rtable = rtable;
 
 	// Create prototype tunnel netmask.
+	struct in_addr addr;
 	memset(&addr, 0, sizeof(addr));
 	inet_pton(AF_INET, "255.255.255.255", &addr);
 	hostmask = addr.s_addr;
@@ -232,23 +441,23 @@ initsock(const char *restrict group, int port, int rtable)
 
 	sd = socket(PF_INET, SOCK_DGRAM, 0);
 	if (sd < 0)
-		fatale("socket UDP");
+		fatal_err("socket UDP");
 	on = 1;
 	if (setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
-		fatale("setsockopt SO_REUSEADDR");
+		fatal_err("setsockopt SO_REUSEADDR");
 	if (setsockopt(sd, SOL_SOCKET, SO_SETFIB, &rtable, sizeof(rtable)) < 0)
-		fatale("setsockopt SO_SETFIB");
+		fatal_err("setsockopt SO_SETFIB");
 	memset(&sin, 0, sizeof(sin));
 	sin.sin_family = AF_INET;
 	sin.sin_port = htons(port);
 	sin.sin_addr.s_addr = htonl(INADDR_ANY);
 	if (bind(sd, (struct sockaddr *)&sin, sizeof(sin)) < 0)
-		fatale("bind UDP");
+		fatal_err("bind UDP");
 	memset(&mr, 0, sizeof(mr));
 	inet_pton(AF_INET, group, &mr.imr_multiaddr.s_addr);
 	mr.imr_interface.s_addr = htonl(INADDR_ANY);
 	if (setsockopt(sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mr, sizeof(mr)) < 0)
-		fatale("setsockopt IP_ADD_MEMBERSHIP");
+		fatal_err("setsockopt IP_ADD_MEMBERSHIP");
 
 	return sd;
 }
@@ -303,7 +512,7 @@ uptunnel(Tunnel *tunnel, int rtable)
 	// Create the interface.
 	strlcpy(ifr.ifr_name, tunnel->ifname, sizeof(ifr.ifr_name));
 	if (ioctl(ctlfd, SIOCIFCREATE, &ifr) < 0)
-		fatal("create %s failed: %m");
+		fatal("create %s failed: %m", tunnel->ifname);
 
 #ifndef SIOCSTUNFIB
 	// Restore thread's FIB
@@ -494,8 +703,15 @@ addroute(Route *route, Tunnel *tunnel, int rtable)
 		return 0;
 
 	len = buildrtmsg(RTM_ADD, route, tunnel, rtable, &rtmsg);
-	if (write(rtfd, &rtmsg, len) != len)
-		fatale("route add failure");
+	if (write(rtfd, &rtmsg, len) != len) {
+		char net[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
+		int cidr;
+		ipaddrstr(route->ipnet, net);
+		cidr = netmask2cidr(route->subnetmask);
+		ipaddrstr(tunnel->outer_remote, gw);
+		fatal("route add failure: net %s/%d -> %s:%s: %m",
+		    net, cidr, tunnel->ifname, gw);
+	}
 
 	return 0;
 }
@@ -534,9 +750,15 @@ rmroute(Route *route, int rtable)
 	size_t len;
 
 	len = buildrtmsg(RTM_DELETE, route, NULL, rtable, &rtmsg);
-	if (write(rtfd, &rtmsg, len) != len)
-		if (errno != ESRCH)
-			fatale("route change failure");
+	if (write(rtfd, &rtmsg, len) != len) {
+		if (errno != ESRCH) {
+			char net[INET_ADDRSTRLEN];
+			ipaddrstr(route->ipnet, net);
+			size_t cidr = netmask2cidr(route->subnetmask);
+			fatal("route remove failure %s/%d: %m",
+			    net, cidr);
+		}
+	}
 
 	return 0;
 }

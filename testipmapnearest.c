@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "dat.h"
-#include "fns.h"
+#include "lib.h"
 
 
 IPMap root, rroot, a, b, c, d, e;

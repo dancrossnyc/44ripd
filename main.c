@@ -83,9 +83,23 @@ static int tunnelfindbyname(uint32_t key, uint32_t keylen, void *datum,
    void *arg);
 static int tunnelfindbydest(uint32_t key, uint32_t keylen, void *datum,
    void *arg);
+static int fix_overlaps(uint32_t key, size_t keylen, void *tunnelp, void *arg);
+static int unlink_redundant(uint32_t key, size_t keylen, void *routep,
+   void *arg);
+static void dump_all(FILE *out);
 
+typedef struct SystemBuildContext SystemBuildContext;
 typedef struct TunnelFindByNameParams TunnelFindByNameParams;
 typedef struct TunnelFindByDestParams TunnelFindByDestParams;
+typedef struct UnlinkRedundantParams UnlinkRedundantParams;
+
+struct SystemBuildContext {
+	IPMap *acceptableroutes;
+	IPMap *tunnels;
+	IPMap *routes;
+	const Bitvec *staticinterfaces;
+	Bitvec *interfaces;
+};
 
 struct TunnelFindByNameParams {
 	const char *name;
@@ -95,6 +109,11 @@ struct TunnelFindByNameParams {
 struct TunnelFindByDestParams {
 	uint32_t destaddr;
 	Tunnel *tunnel;
+};
+
+struct UnlinkRedundantParams {
+	Tunnel *tunnel;
+	Route *parent;
 };
 
 enum {
@@ -140,12 +159,14 @@ init(int argc, char *argv[])
 {
 	const char *local_outer_ip, *local_inner_ip;
 	char *slash;
-	int sd, ch, daemonize, acceptcount;
+	int sd, ch, daemonize, dump;
+	size_t acceptcount;
 	struct in_addr addr;
 
 	slash = strrchr(argv[0], '/');
 	prog = (slash == NULL) ? argv[0] : slash + 1;
 	daemonize = 1;
+	dump = 0;
 	read_from_file = 0;
 	interfaces = mkbitvec();
 	staticinterfaces = mkbitvec();
@@ -157,10 +178,13 @@ init(int argc, char *argv[])
 	tunnels = mkipmap();
 	acceptableroutes = mkipmap();
 	acceptcount = 0;
-	while ((ch = getopt(argc, argv, "dT:A:B:I:s:f:")) != -1) {
+	while ((ch = getopt(argc, argv, "A:B:DI:T:df:s:")) != -1) {
 		switch (ch) {
 		case 'd':
 			daemonize = 0;
+			break;
+		case 'D':
+			dump = 1;
 			break;
 		case 'T':
 			routetable_create = strnum(optarg);
@@ -229,6 +253,12 @@ init(int argc, char *argv[])
 	local_inner_addr = ntohl(addr.s_addr);
 
 	learnsys(routetable_create);
+
+	if (dump) {
+		dump_all(stdout);
+		exit(0);
+	}
+
 	initsys(routetable_create);
 
 	if (!read_from_file)
@@ -251,9 +281,15 @@ enum {
 static void
 learnsys(int rtable)
 {
+	SystemBuildContext ctx;
+	ctx.acceptableroutes = acceptableroutes;
+	ctx.tunnels = tunnels;
+	ctx.routes = routes;
+	ctx.staticinterfaces = staticinterfaces;
+	ctx.interfaces = interfaces;
 
-	discoverifs(rtable, learn_interface_callback, NULL);
-	discoverrts(rtable, learn_route_callback, NULL);
+	discover(rtable, learn_interface_callback, learn_route_callback, &ctx);
+	ipmapdo(tunnels, fix_overlaps, &ctx);
 	time_t expire = time(NULL);
 	expire += TIMEOUT;
 	ipmapdo(routes, set_expire_time, &expire);
@@ -264,12 +300,15 @@ learn_interface_callback(const char *name, int num,
     uint32_t outer_local, uint32_t outer_remote, uint32_t inner_local,
     uint32_t inner_remote, void *arg)
 {
-	if (bitget(staticinterfaces, num))
+	SystemBuildContext *ctx = arg;
+
+	if (bitget(ctx->staticinterfaces, num))
 		return;
 
-	assert(bitget(interfaces, num) == 0);
+	assert(bitget(ctx->interfaces, num) == 0);
 
-	void *accept = ipmapnearest(acceptableroutes, inner_remote, CIDR_HOST);
+	void *accept = ipmapnearest(ctx->acceptableroutes, inner_remote,
+	    CIDR_HOST);
 	if (accept != ACCEPT)
 		fatal("interface %s has unacceptable destination", name);
 
@@ -279,24 +318,24 @@ learn_interface_callback(const char *name, int num,
 	tunnel->ifnum = num;
 	strncpy(tunnel->ifname, name, sizeof(tunnel->ifname)-1);
 
-	if (ipmapinsert(tunnels, outer_remote, CIDR_HOST, tunnel) != tunnel)
+	if (ipmapinsert(ctx->tunnels, outer_remote, CIDR_HOST, tunnel)
+	    != tunnel)
 		fatal("interface %s duplicates another interface", name);
-	bitset(interfaces, num);
+	bitset(ctx->interfaces, num);
 }
 
 static void
 learn_route_callback(uint32_t ipnet, uint32_t mask,
-    int isaddr, uint32_t destaddr, const char *destif, void *unused)
+    int isaddr, uint32_t destaddr, const char *destif, void *arg)
 {
+	SystemBuildContext *ctx = arg;
 	char net[INET_ADDRSTRLEN];
 	Tunnel *tunnel;
-
-	(void)unused;
 
 	int cidr = netmask2cidr(mask);
 	if (cidr == -1) {
 		ipaddrstr(ipnet, net);
-		fatal("unusual netmask found in routed network %s/%08" PRIx32,
+		fatal("unusual netmask found in routed network %s/0x%08" PRIx32,
 		    mask);
 	}
 
@@ -314,7 +353,7 @@ learn_route_callback(uint32_t ipnet, uint32_t mask,
 		tunnel = params.tunnel;
 	}
 
-	void *accept = ipmapnearest(acceptableroutes, ipnet, cidr);
+	void *accept = ipmapnearest(ctx->acceptableroutes, ipnet, cidr);
 
 	if (tunnel == NULL) {
 		if (accept == ACCEPT) {
@@ -332,7 +371,7 @@ learn_route_callback(uint32_t ipnet, uint32_t mask,
 	
 	Route *route = mkroute(ipnet, mask, tunnel->outer_remote);
 
-	if (ipmapinsert(routes, ipnet, cidr, route) != route) {
+	if (ipmapinsert(ctx->routes, ipnet, cidr, route) != route) {
 		ipaddrstr(ipnet, net);
 		fatal("duplicate route for %s/%d detected", net, cidr);
 	}
@@ -376,6 +415,59 @@ set_expire_time(uint32_t key, size_t keylen, void *routep, void *arg)
 
 	route->expires = *when;
 
+	return 0;
+}
+
+static void
+dummy_free(void *unused)
+{
+	(void)unused;
+}
+
+//
+// Work around a general problem that the operating system automatically
+// inserts hosts routes to tunnel inner destinations even if we later
+// assign an entire network to be routed through that tunnel, and the
+// network covers the single host route. These automatically inserted
+// routes need to be detected and removed from the discovered route
+// list.
+//
+static int
+fix_overlaps(uint32_t key, size_t keylen, void *tunnelp, void *arg)
+{
+	Tunnel *tunnel = tunnelp;
+	IPMap *coverage = mkipmap();
+
+	for (Route *route = tunnel->routes; route; route = route->rnext) {
+		size_t cidr = netmask2cidr(route->subnetmask);
+		ipmapinsert(coverage, route->ipnet, cidr, route);
+	}
+
+	UnlinkRedundantParams p;
+	p.tunnel = tunnel;
+	p.parent = NULL;
+
+	ipmapdotopdown(coverage, unlink_redundant, &p);
+
+	freeipmap(coverage, dummy_free);
+
+	return 0;
+}
+
+static int
+unlink_redundant(uint32_t key, size_t keylen, void *routep, void *arg)
+{
+	Route *route = routep;
+	UnlinkRedundantParams *p = arg;
+	Route *parent = p->parent;
+
+	if (parent != NULL && (parent->ipnet & parent->subnetmask) ==
+	    (route->ipnet & parent->subnetmask)) {
+		// This route is redundant.
+		unlinkroute(p->tunnel, route);
+		return 0;
+	}
+	p->parent = route;
 	return 0;
 }
 
@@ -480,8 +572,8 @@ ripresponse(RIPResponse *response, time_t now)
 		uptunnel(tunnel, routetable_create);
 		ipmapinsert(tunnels, response->nexthop, CIDR_HOST, tunnel);
 	}
-	route = ipmapfind(routes, response->ipaddr, cidr);
-	if (route == NULL) {
+	route = ipmapnearest(routes, response->ipaddr, cidr);
+	if (route == NULL || route->tunnel->outer_remote != response->nexthop) {
 		route = mkroute(
 		    response->ipaddr,
 		    response->subnetmask,
@@ -644,7 +736,8 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	tunnel = route->tunnel;
 	assert(tunnel != NULL);
 	unlinkroute(tunnel, route);
-	rmroute(route, routetable_create);
+	if (tunnel->nref)
+		rmroute(route, routetable_create);
 	collapse(tunnel);
 
 	return 0;
@@ -667,11 +760,73 @@ collapse(Tunnel *tunnel)
 	}
 }
 
+static int
+dump_tunnel(uint32_t key, size_t keylen, void *tunnelp, void *arg)
+{
+	Tunnel *tunnel = tunnelp;
+	FILE *out = arg;
+
+	char outer_local[INET_ADDRSTRLEN], outer_remote[INET_ADDRSTRLEN],
+	     inner_local[INET_ADDRSTRLEN], inner_remote[INET_ADDRSTRLEN];
+
+	ipaddrstr(tunnel->outer_local, outer_local);
+	ipaddrstr(tunnel->outer_remote, outer_remote);
+	ipaddrstr(tunnel->inner_local, inner_local);
+	ipaddrstr(tunnel->inner_remote, inner_remote);
+
+	fprintf(out, "Tunnel interface %s:\n"
+	              "\tOuter %s -> %s\n"
+	              "\tInner %s -> %s\n"
+	              "\tRoutes:\n",
+	    tunnel->ifname, outer_local, outer_remote, inner_local,
+	    inner_remote);
+
+	Route *route;
+	for (route = tunnel->routes; route; route = route->rnext) {
+		char net[INET_ADDRSTRLEN];
+		char gateway[INET_ADDRSTRLEN];
+		size_t cidr;
+
+		assert(route->tunnel == tunnel);
+
+		ipaddrstr(route->ipnet, net);
+		cidr = netmask2cidr(route->subnetmask);
+		ipaddrstr(route->gateway, gateway);
+
+		fprintf(out, "\t\t%s/%d -> %s\n", net, cidr, gateway);
+	}
+
+	return 0;
+}
+
+static int
+dump_accept_reject(uint32_t key, size_t keylen, void *accept, void *arg)
+{
+	FILE *out = arg;
+	char net[INET_ADDRSTRLEN];
+
+	ipaddrstr(key, net);
+
+	fprintf(out, "\t%s/%zd -> %s\n", net, keylen,
+	    accept == ACCEPT ? "ACCEPT" : "REJECT");
+
+	return 0;
+}
+
+static void
+dump_all(FILE *out)
+{
+	fputs("Acceptance policy:\n", out);
+	ipmapdotopdown(acceptableroutes, dump_accept_reject, out);
+	fputs("Tunnel interfaces and routes:\n", out);
+	ipmapdo(tunnels, dump_tunnel, out);
+}
+
 void
 usage(const char *restrict prog)
 {
 	fprintf(stderr,
-	    "Usage: %s [ -d ] [ -T <create_rtable> ] [ -I <ignorespec> ] "
+	    "Usage: %s [ -d | -D ] [ -T <create_rtable> ] [ -I <ignorespec> ] "
 	        "[ -A <acceptspec> ] [ -s <static_ifnum> ] [ -f <testfile> ] "
 	        "[ -B <bind_rtable> ] <local-outer-ip> <local-ampr-ip>\n",
 	    prog);

@@ -57,7 +57,7 @@ fatal(const char *fmt, ...)
 }
 
 void
-fatale(const char *msg)
+fatal_err(const char *msg)
 {
 	syslog(LOG_ERR, "%s: %m", msg);
 	exit(EXIT_FAILURE);

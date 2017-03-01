@@ -61,9 +61,14 @@ ipmapnearest(IPMap *map, uint32_t key, size_t keylen)
 			break;
 		rkey >>= map->keylen;
 		keylen -= map->keylen;
-		if (keylen == 0)
-			return map->datum;
-		parent = map;
+		if (keylen == 0) {
+			if (map->datum != NULL)
+				return map->datum;
+			else
+				break;
+		}
+		if (map->datum != NULL)
+			parent = map;
 		map = (rkey & 0x01) ? map->right : map->left;
 	}
 	if (parent == NULL)
@@ -339,6 +344,23 @@ ipmapdorec(IPMap *map, uint32_t key, size_t keylen,
 	return ipmapdorec(map->right, key, keylen, thunk, arg);
 }
 
+// Iterate from middle, then left, then right.
+static int
+ipmapdorectopdown(IPMap *map, uint32_t key, size_t keylen,
+    int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
+    void *arg)
+{
+	if (map == NULL) return 0;
+	key |= (map->key << keylen);
+	keylen += map->keylen;
+	if (map->datum != NULL)
+		if (thunk(revbits(key), keylen, map->datum, arg))
+			return 1;
+	if (ipmapdorectopdown(map->left, key, keylen, thunk, arg))
+		return 1;
+	return ipmapdorectopdown(map->right, key, keylen, thunk, arg);
+}
+
 void
 ipmapdo(IPMap *map,
     int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
@@ -346,6 +368,15 @@ ipmapdo(IPMap *map,
 {
 	if (map != NULL)
 		ipmapdorec(map, 0, 0, thunk, arg);
+}
+
+void
+ipmapdotopdown(IPMap *map,
+    int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
+    void *arg)
+{
+	if (map != NULL)
+		ipmapdorectopdown(map, 0, 0, thunk, arg);
 }
 
 Bitvec *

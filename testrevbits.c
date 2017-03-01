@@ -2,7 +2,7 @@
 #include <stdio.h>
 
 #include "dat.h"
-#include "fns.h"
+#include "lib.h"
 
 void
 test(uint32_t w, uint32_t expected)

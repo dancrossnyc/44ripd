@@ -7,6 +7,6 @@ void info(const char *restrict fmt, ...);
 void notice(const char *restrict fmt, ...);
 void error(const char *restrict fmt, ...);
 void fatal(const char *restrict fmt, ...);
-void fatale(const char *restrict msg);
+void fatal_err(const char *restrict msg);
 
 #endif

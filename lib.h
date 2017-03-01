@@ -38,6 +38,7 @@ uint32_t revbits(uint32_t w);
 IPMap *mkipmap(void);
 void freeipmap(IPMap *map, void (*freedatum)(void *));
 void ipmapdo(IPMap *map, int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg), void *arg);
+void ipmapdotopdown(IPMap *map, int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg), void *arg);
 void *ipmapinsert(IPMap *map, uint32_t key, size_t keylen, void *datum);
 void *ipmapremove(IPMap *map, uint32_t key, size_t keylen);
 void *ipmapnearest(IPMap *map, uint32_t key, size_t keylen);

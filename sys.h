@@ -13,8 +13,8 @@ typedef void (*if_discovered_thunk)(const char *name, int num,
 typedef void (*rt_discovered_thunk)(uint32_t ipnet, uint32_t mask,
     int isaddr, uint32_t dstaddr, const char *dstif, void *arg);
         
-void discoverifs(int rtable, if_discovered_thunk thunk, void *arg);
-void discoverrts(int rtable, rt_discovered_thunk thunk, void *arg);
+void discover(int rtable, if_discovered_thunk ifthunk,
+    rt_discovered_thunk rtthunk, void *arg);
 int initsock(const char *restrict group, int port, int rtable);
 void initsys(int rtable);
 int uptunnel(Tunnel *tunnel, int rtable);
