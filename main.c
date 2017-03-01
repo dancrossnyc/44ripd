@@ -63,6 +63,8 @@ static void learn_interface_callback(const char *name, int num,
     uint32_t inner_remote, void *arg);
 static void learn_route_callback(uint32_t ipnet, uint32_t mask,
     int isaddr, uint32_t dstaddr, const char *dstif, void *arg);
+static int set_expire_time(uint32_t key, size_t keylen, void *routep,
+    void *arg);
 static unsigned int strnum(const char *restrict str);
 static void riptide(int sd);
 static void ripresponse(RIPResponse *response, time_t now);
@@ -249,8 +251,12 @@ enum {
 static void
 learnsys(int rtable)
 {
+
 	discoverifs(rtable, learn_interface_callback, NULL);
 	discoverrts(rtable, learn_route_callback, NULL);
+	time_t expire = time(NULL);
+	expire += TIMEOUT;
+	ipmapdo(routes, set_expire_time, &expire);
 }
 
 static void
@@ -358,6 +364,17 @@ tunnelfindbyname(uint32_t key, uint32_t keylen, void *datum, void *arg)
 		params->tunnel = tunnel;
 		return 1;
 	}
+
+	return 0;
+}
+
+static int
+set_expire_time(uint32_t key, size_t keylen, void *routep, void *arg)
+{
+	Route *route = routep;
+	time_t *when = arg;
+
+	route->expires = *when;
 
 	return 0;
 }
