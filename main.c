@@ -41,6 +41,7 @@
 #include <arpa/inet.h>
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,7 +57,8 @@ unsigned int strnum(const char *restrict str);
 void riptide(int sd);
 void ripresponse(RIPResponse *response, time_t now);
 Route *mkroute(uint32_t ipnet, uint32_t subnetmask, uint32_t gateway);
-Tunnel *mktunnel(uint32_t local, uint32_t remote);
+Tunnel *mktunnel(uint32_t outer_local, uint32_t outer_remote,
+    uint32_t inner_local, uint32_t inner_remote);
 void alloctunif(Tunnel *tunnel, Bitvec *interfaces);
 void unlinkroute(Tunnel *tunnel, Route *route);
 void linkroute(Tunnel *tunnel, Route *route);
@@ -73,19 +75,23 @@ enum {
 	TIMEOUT = 7*24*60*60,	// 7 days
 };
 
-const char *RIPV2_GROUP = "224.0.0.9";
-const char *PASSWORD = "pLaInTeXtpAsSwD";
+static const char *RIPV2_GROUP = "224.0.0.9";
+static const char *PASSWORD = "pLaInTeXtpAsSwD";
 
-IPMap *ignoreroutes;
-IPMap *routes;
-IPMap *tunnels;
-Bitvec *interfaces;
-Bitvec *staticinterfaces;
+static void * const IGNORE = (void *)0x10;	// Arbitrary.
+static void * const ACCEPT = (void *)0x11;	// Arbitrary.
 
-const char *prog;
-uint32_t localaddr;
-int routetable;
-int lowgif;
+static IPMap *acceptableroutes;
+static IPMap *routes;
+static IPMap *tunnels;
+static Bitvec *interfaces;
+static Bitvec *staticinterfaces;
+
+static const char *prog;
+static uint32_t local_outer_addr;
+static uint32_t local_inner_addr;
+static int routetable_bind, routetable_create;
+static int read_from_file;
 
 int
 main(int argc, char *argv[])
@@ -103,46 +109,68 @@ main(int argc, char *argv[])
 int
 init(int argc, char *argv[])
 {
-	const char *localip;
+	const char *local_outer_ip, *local_inner_ip;
 	char *slash;
-	int sd, ch, daemonize;
+	int sd, ch, daemonize, acceptcount;
 	struct in_addr addr;
 
 	slash = strrchr(argv[0], '/');
 	prog = (slash == NULL) ? argv[0] : slash + 1;
 	daemonize = 1;
+	read_from_file = 0;
 	interfaces = mkbitvec();
 	staticinterfaces = mkbitvec();
-	routetable = DEFAULT_ROUTE_TABLE;
-	localip = NULL;
+	routetable_create = DEFAULT_ROUTE_TABLE;
+	routetable_bind = DEFAULT_ROUTE_TABLE;
+	local_outer_ip = NULL;
+	local_inner_ip = NULL;
 	routes = mkipmap();
 	tunnels = mkipmap();
-	while ((ch = getopt(argc, argv, "dT:L:I:s:")) != -1) {
+	acceptableroutes = mkipmap();
+	acceptcount = 0;
+	while ((ch = getopt(argc, argv, "dT:A:B:I:s:f:")) != -1) {
 		switch (ch) {
 		case 'd':
 			daemonize = 0;
 			break;
 		case 'T':
-			routetable = strnum(optarg);
+			routetable_create = strnum(optarg);
 			break;
+		case 'B':
+			routetable_bind = strnum(optarg);
+			break;
+		case 'A':
 		case 'I': {
-			static void *IGNORE = (void *)0x10;	// Arbitrary.
-			uint32_t iroute;
+			void *ignore_accept = (ch == 'A' ? ACCEPT : IGNORE);
+			struct in_addr iroute;
 			size_t icidr;
 
 			slash = strchr(optarg, '/');
 			if (slash == NULL)
 				fatal("Bad route (use CIDR): %s\n", optarg);
 			*slash++ = '\0';
-			iroute = strnum(optarg);
+			if (inet_aton(optarg, &iroute) != 1)
+				fatal("Bad route addr: %s\n", optarg);
+			iroute.s_addr = ntohl(iroute.s_addr);
 			icidr = strnum(slash);
-			ipmapinsert(ignoreroutes, iroute, icidr, IGNORE);
+			ipmapinsert(acceptableroutes, iroute.s_addr, icidr,
+			    ignore_accept);
+			acceptcount++;
 			break;
 		}
 		case 's': {
 			unsigned int ifnum = strnum(optarg);
 			bitset(staticinterfaces, ifnum);
 			bitset(interfaces, ifnum);
+			break;
+		}
+		case 'f': {
+			if (read_from_file)
+				fatal("Can only read from one file.\n");
+			read_from_file = 1;
+			sd = open(optarg, O_RDONLY);
+			if (sd < 0)
+				fatal("Can't open '%s'\n", optarg);
 			break;
 		}
 		case '?':
@@ -155,16 +183,28 @@ init(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	if (argc < 1)
+	if (argc < 2)
 		usage(prog);
 
-	localip = argv[0];
+	if (acceptcount == 0)
+		// Accept everything by default
+		ipmapinsert(acceptableroutes, 0, 0, ACCEPT);
 
-	initsys(routetable);
-	sd = initsock(RIPV2_GROUP, RIPV2_PORT, routetable);
+	local_outer_ip = argv[0];
+	local_inner_ip = argv[1];
+
+	initsys(routetable_create);
+
+	if (!read_from_file)
+		sd = initsock(RIPV2_GROUP, RIPV2_PORT, routetable_bind);
+
 	memset(&addr, 0, sizeof(addr));
-	inet_pton(AF_INET, localip, &addr);
-	localaddr = ntohl(addr.s_addr);
+
+	inet_pton(AF_INET, local_outer_ip, &addr);
+	local_outer_addr = ntohl(addr.s_addr);
+
+	inet_pton(AF_INET, local_inner_ip, &addr);
+	local_inner_addr = ntohl(addr.s_addr);
 
 	initlog();
 	if (daemonize) {
@@ -211,7 +251,13 @@ riptide(int sd)
 	memset(&remote, 0, sizeof(remote));
 	remotelen = 0;
 	rem = (struct sockaddr *)&remote;
-	n = recvfrom(sd, packet, sizeof(packet), 0, rem, &remotelen);
+	if (read_from_file) {
+		n = read(sd, packet, sizeof(packet));
+		if (n == 0)
+			fatal("done");
+	} else {
+		n = recvfrom(sd, packet, sizeof(packet), 0, rem, &remotelen);
+	}
 	if (n < 0)
 		fatal("socket error");
 	memset(&pkt, 0, sizeof(pkt));
@@ -240,6 +286,7 @@ void
 ripresponse(RIPResponse *response, time_t now)
 {
 	Route *route;
+	void *acceptance;
 	Tunnel *tunnel;
 	size_t cidr;
 	char proute[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
@@ -251,7 +298,7 @@ ripresponse(RIPResponse *response, time_t now)
 		error("route ipaddr %s has more bits than netmask, %zu",
 		    proute, cidr);
 	response->ipaddr &= response->subnetmask;
-	if (response->nexthop == localaddr) {
+	if (response->nexthop == local_outer_addr) {
 		notice("skipping route for %s/%zu to local address",
 		    proute, cidr);
 		return;
@@ -261,11 +308,17 @@ ripresponse(RIPResponse *response, time_t now)
 		    proute, cidr, gw);
 		return;
 	}
+	acceptance = ipmapnearest(acceptableroutes, response->ipaddr, cidr);
+	if (acceptance == NULL || acceptance != ACCEPT) {
+		info("skipping ignored network %s/%zu", proute, cidr);
+		return;
+	}
 	tunnel = ipmapfind(tunnels, response->nexthop, CIDR_HOST);
 	if (tunnel == NULL) {
-		tunnel = mktunnel(localaddr, response->nexthop);
+		tunnel = mktunnel(local_outer_addr, response->nexthop,
+		    local_inner_addr, response->ipaddr);
 		alloctunif(tunnel, interfaces);
-		uptunnel(tunnel, routetable);
+		uptunnel(tunnel, routetable_create);
 		ipmapinsert(tunnels, response->nexthop, CIDR_HOST, tunnel);
 	}
 	route = ipmapfind(routes, response->ipaddr, cidr);
@@ -280,9 +333,9 @@ ripresponse(RIPResponse *response, time_t now)
 	// The route is new or moved to a different tunnel.
 	if (route->tunnel != tunnel) {
 		if (route->tunnel == NULL)
-			addroute(route, tunnel, routetable);
+			addroute(route, tunnel, routetable_create);
 		else
-			chroute(route, tunnel, routetable);
+			chroute(route, tunnel, routetable_create);
 		unlinkroute(tunnel, route);
 		unlinkroute(route->tunnel, route);
 		collapse(route->tunnel);
@@ -308,15 +361,18 @@ mkroute(uint32_t ipnet, uint32_t subnetmask, uint32_t gateway)
 }
 
 Tunnel *
-mktunnel(uint32_t local, uint32_t remote)
+mktunnel(uint32_t outer_local, uint32_t outer_remote, uint32_t inner_local,
+    uint32_t inner_remote)
 {
 	Tunnel *tunnel;
 
 	tunnel = calloc(1, sizeof(*tunnel));
 	if (tunnel == NULL)
 		fatal("malloc");
-	tunnel->local = local;
-	tunnel->remote = remote;
+	tunnel->outer_local = outer_local;
+	tunnel->outer_remote = outer_remote;
+	tunnel->inner_local = inner_local;
+	tunnel->inner_remote = inner_remote;
 
 	return tunnel;
 }
@@ -362,7 +418,7 @@ linkroute(Tunnel *tunnel, Route *route)
 	route->rnext = tunnel->routes;
 	tunnel->routes = route;
 	route->tunnel = tunnel;
-	route->gateway = tunnel->remote;
+	route->gateway = tunnel->inner_remote;
 	++tunnel->nref;
 }
 
@@ -427,7 +483,7 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	tunnel = route->tunnel;
 	assert(tunnel != NULL);
 	unlinkroute(tunnel, route);
-	rmroute(route, routetable);
+	rmroute(route, routetable_create);
 	collapse(tunnel);
 }
 
@@ -438,7 +494,8 @@ collapse(Tunnel *tunnel)
 		return;
 	assert(tunnel->nref >= 0);
 	if (tunnel->nref == 0) {
-		void *datum = ipmapremove(tunnels, tunnel->remote, CIDR_HOST);
+		void *datum = ipmapremove(tunnels, tunnel->outer_remote,
+		    CIDR_HOST);
 		assert(datum == tunnel);
 		info("Tearing down tunnel interface %s", tunnel->ifname);
 		downtunnel(tunnel);
@@ -451,8 +508,9 @@ void
 usage(const char *restrict prog)
 {
 	fprintf(stderr,
-	    "Usage: %s [ -d ] [ -T <rtable> ] [ -I <ignorespec> ] "
-	        "[ -s <static_ifnum> ] <localip>\n",
+	    "Usage: %s [ -d ] [ -T <create_rtable> ] [ -I <ignorespec> ] "
+	        "[ -A <acceptspec> ] [ -s <static_ifnum> ] [ -f <testfile> ] "
+	        "[ -B <bind_rtable> ] <local-outer-ip> <local-ampr-ip>\n",
 	    prog);
 	exit(EXIT_FAILURE);
 }

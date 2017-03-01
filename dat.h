@@ -73,8 +73,10 @@ enum {
 
 struct Tunnel {
 	Route *routes;
-	uint32_t local;
-	uint32_t remote;
+	uint32_t outer_local;
+	uint32_t outer_remote;
+	uint32_t inner_local;
+	uint32_t inner_remote;
 	int nref;
 	char ifname[MAX_TUN_IFNAME];
 	unsigned int ifnum;

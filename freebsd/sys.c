@@ -3,6 +3,7 @@
 #include <sys/sockio.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <net/if_dl.h>
 #include <net/if_var.h>
 #include <net/route.h>
 #include <netinet/in.h>
@@ -117,7 +118,8 @@ initsock(const char *restrict group, int port, int rtable)
  * 3. Set the tunnel routing domain.
  * 4. Set the interface routing domain.
  * 5. Configure the interface up and mark it running.
- * 6. Configure IP on the interface.
+ * 6. Configure outer IP source and destination on the interface.
+ * 7. Configure inner IPs on the interface.
  */
 int
 uptunnel(Tunnel *tunnel, int rtable)
@@ -164,11 +166,11 @@ uptunnel(Tunnel *tunnel, int rtable)
 
 	addr.sin_len = sizeof(addr);
 	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(tunnel->local);
+	addr.sin_addr.s_addr = htonl(tunnel->outer_local);
 	assert(sizeof(addr) <= sizeof(ifar.ifra_addr));
 	memmove(&ifar.ifra_addr, &addr, sizeof(addr));
 
-	addr.sin_addr.s_addr = htonl(tunnel->remote);
+	addr.sin_addr.s_addr = htonl(tunnel->outer_remote);
 	assert(sizeof(addr) <= sizeof(ifar.ifra_dstaddr));
 	memmove(&ifar.ifra_dstaddr, &addr, sizeof(addr));
 
@@ -176,8 +178,8 @@ uptunnel(Tunnel *tunnel, int rtable)
 	if (ioctl(ctlfd, SIOCSIFPHYADDR, &ifar) < 0) {
 		char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN];
 
-		ipaddrstr(tunnel->local, local);
-		ipaddrstr(tunnel->remote, remote);
+		ipaddrstr(tunnel->outer_local, local);
+		ipaddrstr(tunnel->outer_remote, remote);
 		err(EXIT_FAILURE, "tunnel %s failed (local %s remote %s)",
 		    tunnel->ifname, local, remote);
 	}
@@ -213,12 +215,25 @@ uptunnel(Tunnel *tunnel, int rtable)
 	if (ioctl(ctlfd, SIOCSIFFLAGS, &ifr) < 0)
 		err(EXIT_FAILURE, "cannot set flags for %s", tunnel->ifname);
 
+
+	//
+	// Set up the tunnel's inner addresses.
+	//
+	addr.sin_len = sizeof(addr);
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(tunnel->inner_local);
+	assert(sizeof(addr) <= sizeof(ifar.ifra_addr));
+	memmove(&ifar.ifra_addr, &addr, sizeof(addr));
+
+	addr.sin_addr.s_addr = htonl(tunnel->inner_remote);
+	assert(sizeof(addr) <= sizeof(ifar.ifra_dstaddr));
+	memmove(&ifar.ifra_dstaddr, &addr, sizeof(addr));
+
 	// Configure IP on interface.
 	if (ioctl(ctlfd, SIOCAIFADDR, &ifar) < 0) {
 		char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN];
-
-		ipaddrstr(tunnel->local, local);
-		ipaddrstr(tunnel->remote, remote);
+		ipaddrstr(tunnel->inner_local, local);
+		ipaddrstr(tunnel->inner_remote, remote);
 		err(EXIT_FAILURE, "inet %s failed (local %s, remote %s)",
 		    tunnel->ifname, local, remote);
 	}
@@ -245,7 +260,7 @@ typedef struct Routemsg Routemsg;
 struct Routemsg {
 	alignas(long) struct rt_msghdr header;
 	alignas(long) struct sockaddr_in dst;
-	alignas(long) struct sockaddr_in gw;
+	alignas(long) struct sockaddr_dl gw;
 	alignas(long) struct sockaddr_in netmask;
 };
 
@@ -254,7 +269,8 @@ buildrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
 {
 	static int seqno = 0;
 	struct rt_msghdr *header;
-	struct sockaddr_in *dst, *gw, *netmask;
+	struct sockaddr_in *dst, *netmask;
+	struct sockaddr_dl *gw;
 
 	assert(route != NULL);
 	if (cmd != RTM_DELETE)
@@ -288,13 +304,15 @@ buildrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
 	dst->sin_family = AF_INET;
 	dst->sin_addr.s_addr = htonl(route->ipnet);
 
-	netmask = &msg->gw;
 	if (cmd != RTM_DELETE) {
-		netmask = &msg->netmask;
 		gw = &msg->gw;
-		gw->sin_len = sizeof(*gw);
-		gw->sin_family = AF_INET;
-		gw->sin_addr.s_addr = htonl(tunnel->remote);
+		gw->sdl_len = sizeof(*gw);
+		gw->sdl_family = AF_LINK;
+		gw->sdl_nlen = strlen(tunnel->ifname);
+		strncpy(gw->sdl_data, tunnel->ifname, sizeof(gw->sdl_data));
+		netmask = (struct sockaddr_in *) &msg->netmask;
+	} else {
+		netmask = (struct sockaddr_in *) &msg->gw;
 	}
 
 	netmask->sin_len = sizeof(*netmask);
@@ -303,8 +321,8 @@ buildrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
 	if (cmd == RTM_DELETE)
 		header->rtm_msglen -= sizeof(*gw);
 
-	header->rtm_flags |=
-	    (route->subnetmask == hostmask) ? RTF_HOST : RTF_GATEWAY;
+	if (route->subnetmask == hostmask)
+		header->rtm_flags |= RTF_HOST;
 
 	return header->rtm_msglen;
 }
@@ -314,6 +332,15 @@ addroute(Route *route, Tunnel *tunnel, int rtable)
 {
 	Routemsg rtmsg;
 	size_t len;
+
+	if (route->subnetmask == hostmask &&
+	    route->ipnet == tunnel->inner_remote)
+		//
+		// There's no need to add this route. It will
+		// have automatically been added by the kernel when the
+		// tunnel was brought up.
+		//
+		return 0;
 
 	len = buildrtmsg(RTM_ADD, route, tunnel, rtable, &rtmsg);
 	if (write(rtfd, &rtmsg, len) != len)

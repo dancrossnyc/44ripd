@@ -1,7 +1,7 @@
 #
 #CC=			egcc
 FLAGS=			-Wall -Werror -ansi -pedantic -std=c11 -I. -DUSE_COMPAT
-CFLAGS=			$(FLAGS) -g
+CFLAGS=			$(FLAGS) -O2
 SRCS=			main.c rip.c lib.c freebsd/sys.c compat.c
 OBJS=			main.o rip.o lib.o freebsd/sys.o compat.o
 PROG=			44ripd
