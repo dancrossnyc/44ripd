@@ -36,6 +36,15 @@ static int rtfd_rtable = -1;
 
 static uint32_t hostmask;
 
+static inline size_t
+sa_roundup(size_t len)
+{
+	size_t residual = len % sizeof(long);
+	if (residual != 0)
+		len += sizeof(long) - residual;
+	return len;
+}
+
 void
 discoverifs(int rtable, if_discovered_thunk thunk, void *arg)
 {
@@ -139,13 +148,14 @@ discoverrts(int rtable, rt_discovered_thunk thunk, void *arg)
 		struct sockaddr_in *sin = (struct sockaddr_in *)netaddr;
 		net = ntohl(sin->sin_addr.s_addr);
 		struct sockaddr *gwaddr = (struct sockaddr *)
-		    (((char *)netaddr) + netaddr->sa_len);
+		    (((char *)netaddr) + sa_roundup(netaddr->sa_len));
 		if (gwaddr->sa_family == AF_LINK) {
 			struct sockaddr_dl *sdl = (struct sockaddr_dl *)gwaddr;
 			if (sdl->sdl_nlen == 0)
 				// Nondescript "link" route. Not needed.
 				continue;
 			isaddr = 0;
+			dest = 0;
 			if (sdl->sdl_nlen > sizeof(ifname)-1)
 				fatal("interface name too big");
 			memcpy(ifname, sdl->sdl_data, sdl->sdl_nlen);
@@ -159,11 +169,13 @@ discoverrts(int rtable, rt_discovered_thunk thunk, void *arg)
 			continue;
 		}
 		struct sockaddr *maskaddr = (struct sockaddr *)
-		    (((char *)gwaddr) + gwaddr->sa_len);
-		if (maskaddr->sa_family != AF_INET)
-			continue;
-		sin = (struct sockaddr_in *)maskaddr;
-		netmask = ntohl(sin->sin_addr.s_addr);
+		    (((char *)gwaddr) + sa_roundup(gwaddr->sa_len));
+		if (maskaddr->sa_len == 0) {
+			netmask = 0;
+		} else {
+			sin = (struct sockaddr_in *)maskaddr;
+			netmask = ntohl(sin->sin_addr.s_addr);
+		}
 
 		thunk(net, netmask, isaddr, dest, ifname, arg);
 	}
