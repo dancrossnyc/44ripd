@@ -363,7 +363,9 @@ learn_interface_callback(const char *name, int num,
 
 	if (ipmapinsert(ctx->tunnels, outer_remote, CIDR_HOST, tunnel)
 	    != tunnel)
+	{
 		fatal("interface %s duplicates another interface", name);
+	}
 	bitset(ctx->interfaces, num);
 }
 
@@ -375,11 +377,11 @@ learn_route_callback(uint32_t ipnet, uint32_t mask,
 	char net[INET_ADDRSTRLEN];
 	Tunnel *tunnel;
 
+	ipaddrstr(ipnet, net);
 	int cidr = netmask2cidr(mask);
 	if (cidr == -1) {
-		ipaddrstr(ipnet, net);
 		fatal("unusual netmask found in routed network %s/0x%08" PRIx32,
-		    mask);
+		    net, mask);
 	}
 
 	if (isaddr) {
@@ -400,23 +402,37 @@ learn_route_callback(uint32_t ipnet, uint32_t mask,
 
 	if (tunnel == NULL) {
 		if (accept == ACCEPT) {
-			ipaddrstr(ipnet, net);
 			fatal("acceptable network %s/%d routed to "
 			    "unknown destination", net, cidr);
 		}
 		return;
 	}
 	if (accept != ACCEPT) {
-		ipaddrstr(ipnet, net);
 		fatal("unacceptable network %s/%d found with managed tunnel",
 		    net, cidr);
 	}
 	
 	Route *route = mkroute(ipnet, mask, tunnel->outer_remote);
+	Route *existing = ipmapinsert(ctx->routes, ipnet, cidr, route);
 
-	if (ipmapinsert(ctx->routes, ipnet, cidr, route) != route) {
-		ipaddrstr(ipnet, net);
-		fatal("duplicate route for %s/%d detected", net, cidr);
+	if (existing != route) {
+		if (existing->ipnet != route->ipnet ||
+		    existing->subnetmask != route->subnetmask ||
+		    existing->gateway != route->gateway)
+		{
+			char othernet[INET_ADDRSTRLEN],
+			     othergw[INET_ADDRSTRLEN],
+			     gw[INET_ADDRSTRLEN];
+			int othercidr = netmask2cidr(existing->subnetmask);
+			ipaddrstr(route->gateway, gw);
+			ipaddrstr(existing->ipnet, othernet);
+			ipaddrstr(existing->gateway, othergw);
+			fatal("duplicate route for %s/%d->%s detected (other "
+			      "%s/%d->%s", net, cidr, gw, othernet, othercidr,
+			      othergw);
+		}
+		free(route);
+		return;
 	}
 
 	linkroute(tunnel, route);
@@ -482,7 +498,7 @@ fix_overlaps(uint32_t key, size_t keylen, void *tunnelp, void *arg)
 	IPMap *coverage = mkipmap();
 
 	for (Route *route = tunnel->routes; route; route = route->rnext) {
-		size_t cidr = netmask2cidr(route->subnetmask);
+		int cidr = netmask2cidr(route->subnetmask);
 		ipmapinsert(coverage, route->ipnet, cidr, route);
 	}
 
@@ -529,7 +545,8 @@ unlink_redundant(uint32_t key, size_t keylen, void *routep, void *arg)
 	Route *parent = p->parent;
 
 	if (parent != NULL && (parent->ipnet & parent->subnetmask) ==
-	    (route->ipnet & parent->subnetmask)) {
+	    (route->ipnet & parent->subnetmask))
+	{
 		// This route is redundant.
 		unlinkroute(p->tunnel, route);
 		return 0;
@@ -606,33 +623,36 @@ ripresponse(RIPResponse *response, time_t now)
 	Route *route;
 	void *acceptance;
 	Tunnel *tunnel;
-	size_t cidr;
+	int cidr;
 	char proute[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
 
 	cidr = netmask2cidr(response->subnetmask);
 	ipaddrstr(response->ipaddr, proute);
 	ipaddrstr(response->nexthop, gw);
+	debug("RIPv2 response: %s/%d -> %s", proute, cidr, gw);
 	if (response->ipaddr & ~response->subnetmask)
-		error("route ipaddr %s has more bits than netmask, %zu",
+		error("route ipaddr %s has more bits than netmask, %d",
 		    proute, cidr);
 	response->ipaddr &= response->subnetmask;
 	if (response->nexthop == local_outer_addr) {
-		info("skipping route for %s/%zu to local address",
+		info("skipping route for %s/%d to local address",
 		    proute, cidr);
 		return;
 	}
 	if ((response->nexthop & response->subnetmask) == response->ipaddr) {
-		info("skipping gateway inside of subnet (%s/%zu -> %s)",
+		info("skipping gateway inside of subnet (%s/%d -> %s)",
 		    proute, cidr, gw);
 		return;
 	}
 	acceptance = ipmapnearest(acceptableroutes, response->ipaddr, cidr);
 	if (acceptance == NULL || acceptance != ACCEPT) {
-		info("skipping ignored network %s/%zu", proute, cidr);
+		info("skipping ignored network %s/%d", proute, cidr);
 		return;
 	}
 	tunnel = ipmapfind(tunnels, response->nexthop, CIDR_HOST);
 	if (tunnel == NULL) {
+		debug("creating new tunnel for %s/%d -> %s", proute, cidr,
+		    gw);
 		tunnel = mktunnel(local_outer_addr, response->nexthop,
 		    local_inner_addr, response->ipaddr);
 		alloctunif(tunnel, interfaces);
@@ -642,33 +662,43 @@ ripresponse(RIPResponse *response, time_t now)
 	route = ipmapfind(routes, response->ipaddr, cidr);
 	if (route == NULL) {
 		Route *cover = ipmapnearest(routes, response->ipaddr, cidr);
-		if (cover != NULL && cover->tunnel == tunnel) {
+		if (cover != NULL) {
 			char covernet[INET_ADDRSTRLEN];
 			ipaddrstr(cover->ipnet, covernet);
-			info("skipping network %s/%d because it is served "
-			    "by %s/%d", proute, cidr, covernet,
-			    netmask2cidr(cover->subnetmask));
-			return;
+			int covercidr = netmask2cidr(cover->subnetmask);	
+			if (cover->tunnel == tunnel) {
+				info("skipping network %s/%d because it is "
+				    "served by %s/%d", proute, cidr, covernet,
+				    covercidr);
+				return;
+			}
+			debug("branching network %s/%d off of %s/d",
+			    proute, cidr, covernet, covercidr);
 		}
 		route = mkroute(
 		    response->ipaddr,
 		    response->subnetmask,
 		    response->nexthop);
 		ipmapinsert(routes, route->ipnet, cidr, route);
-		info("Added route %s/%zu -> %s", proute, cidr, gw);
+		info("Added route %s/%d -> %s", proute, cidr, gw);
 	}
 	if (route->tunnel != tunnel) {
 		// The route is new or moved to a different tunnel.
-		if (route->tunnel == NULL)
+		if (route->tunnel == NULL) {
+			debug("no tunnel for %s/%d, adding new route via %s",
+			    proute, cidr, gw, tunnel->ifname);
 			addroute(route, tunnel, routetable_create);
-		else
+		} else {
+			debug("tunnel for %s/%d changed. %s -> %s",
+			    proute, cidr, route->tunnel->ifname,
+			    tunnel->ifname);
 			chroute(route, tunnel, routetable_create);
+		}
 		unlinkroute(route->tunnel, route);
 		collapse(route->tunnel);
 		linkroute(tunnel, route);
 	}
 	route->expires = now + TIMEOUT;
-	debug("RIPv2 response: %s/%zu -> %s", proute, cidr, gw);
 }
 
 Route *
@@ -744,7 +774,7 @@ linkroute(Tunnel *tunnel, Route *route)
 	route->rnext = tunnel->routes;
 	tunnel->routes = route;
 	route->tunnel = tunnel;
-	route->gateway = tunnel->inner_remote;
+	route->gateway = tunnel->outer_remote;
 	++tunnel->nref;
 }
 
@@ -771,7 +801,7 @@ expire(uint32_t key, size_t keylen, void *routep, void *statep)
 {
 	Route *route = routep;
 	WalkState *state = statep;
-	size_t cidr;
+	int cidr;
 	char proute[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
 
 	if (route->expires > state->now)
@@ -783,7 +813,7 @@ expire(uint32_t key, size_t keylen, void *routep, void *statep)
 	assert(cidr == keylen);
 	ipaddrstr(route->ipnet, proute);
 	ipaddrstr(route->gateway, gw);
-	info("Expiring route %s/%zu -> %s", proute, cidr, gw);
+	info("Expiring route %s/%d -> %s", proute, cidr, gw);
 	ipmapinsert(state->deleting, key, keylen, route);
 
 	return 0;
@@ -795,7 +825,7 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	Route *route = routep;
 	Tunnel *tunnel;
 	void *datum;
-	size_t cidr;
+	int cidr;
 	char proute[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN];
 
 	(void)unused;
@@ -805,7 +835,7 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	assert(cidr == keylen);
 	ipaddrstr(route->ipnet, proute);
 	ipaddrstr(route->gateway, gw);
-	info("Destroying route %s/%zu -> %s", proute, cidr, gw);
+	info("Destroying route %s/%d -> %s", proute, cidr, gw);
 	datum = ipmapremove(routes, key, keylen);
 	assert(datum == route);
 	tunnel = route->tunnel;

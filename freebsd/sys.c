@@ -39,6 +39,13 @@ struct iface_info {
 	iface_info *next;
 };
 
+enum TunnelAddrAction {
+	TUN_ADDR_DELETE = 0,
+	TUN_ADDR_ADD = 1,
+};
+
+typedef enum TunnelAddrAction TunnelAddrAction;
+
 static int ctlfd = -1;
 static int rtfd = -1;
 static int rtfd_rtable = -1;
@@ -47,7 +54,7 @@ static uint32_t hostmask;
 
 static void discoverroute(iface_info *ifaces, int rtable,
     struct rt_msghdr *rtm, rt_discovered_thunk thunk, void *arg);
-static void tunnel_configure_inner(Tunnel *tunnel);
+static void tunnel_configure_inner(Tunnel *tunnel, TunnelAddrAction act);
 static void tunnel_rebase(Tunnel *tunnel, Route *route, int rtable);
 
 static inline size_t
@@ -579,7 +586,7 @@ uptunnel(Tunnel *tunnel, int rtable)
 	//
 	// Set up the tunnel's inner addresses.
 	//
-	tunnel_configure_inner(tunnel);
+	tunnel_configure_inner(tunnel, TUN_ADDR_ADD);
 
 	return 0;
 }
@@ -678,12 +685,14 @@ addroute(Route *route, Tunnel *tunnel, int rtable)
 
 	if (route->subnetmask == hostmask &&
 	    route->ipnet == tunnel->inner_remote)
+	{
 		//
 		// There's no need to add this route. It will
 		// have automatically been added by the kernel when the
 		// tunnel was brought up.
 		//
 		return 0;
+	}
 
 	len = buildrtmsg(RTM_ADD, route, tunnel, rtable, &rtmsg);
 	if (write(rtfd, &rtmsg, len) != len) {
@@ -775,18 +784,19 @@ tunnel_rebase(Tunnel *tunnel, Route *route, int rtable)
 {
 	assert(route->tunnel == tunnel);
 
+	//
+	// Delete the tunnel's inner source and destination addresses.
+	// If there are any other routes directed through this tunnel they
+	// will unfortunately be deleted from the system, but we will address
+	// that next.
+	//
+	tunnel_configure_inner(tunnel, TUN_ADDR_DELETE);
+
 	if (tunnel->nref == 1) {
 		//
-		// The tunnel only has one route. Just bring it down
-		// (but don't destroy it.)
+		// The tunnel only had this one route. Leave it configured
+		// because the system will attempt to destroy it soon.
 		//
-		struct ifreq ifr;
-		strlcpy(ifr.ifr_name, tunnel->ifname, sizeof(ifr.ifr_name));
-		if (ioctl(ctlfd, SIOCGIFFLAGS, &ifr) < 0)
-			fatal("cannot get flags for %s: %m", tunnel->ifname);
-		ifr.ifr_flags &= ~(IFF_UP);
-		if (ioctl(ctlfd, SIOCSIFFLAGS, &ifr) < 0)
-			fatal("cannot set flags for %s: %m", tunnel->ifname);
 		return;
 	}
 
@@ -805,11 +815,10 @@ tunnel_rebase(Tunnel *tunnel, Route *route, int rtable)
 	// this interface.
 	//
 	tunnel->inner_remote = newrt->ipnet;
-	tunnel_configure_inner(tunnel);
+	tunnel_configure_inner(tunnel, TUN_ADDR_ADD);
 
 	//
-	// Unfortunately, this completely destroys the routes that were
-	// attached to this interface. We now have to re-add them.
+	// Add back all the other routes that were attached to this interface.
 	//
 	Route *other;
 	for (other = tunnel->routes; other != NULL; other = other->rnext)
@@ -818,7 +827,7 @@ tunnel_rebase(Tunnel *tunnel, Route *route, int rtable)
 }
 
 static void
-tunnel_configure_inner(Tunnel *tunnel)
+tunnel_configure_inner(Tunnel *tunnel, TunnelAddrAction action)
 {
 	struct sockaddr_in addr;
 	struct in_aliasreq ifar;
@@ -835,13 +844,24 @@ tunnel_configure_inner(Tunnel *tunnel)
 	assert(sizeof(addr) <= sizeof(ifar.ifra_dstaddr));
 	memmove(&ifar.ifra_dstaddr, &addr, sizeof(addr));
 
-	// Configure IP on interface.
-	if (ioctl(ctlfd, SIOCAIFADDR, &ifar) < 0) {
+	unsigned long ioctl_request;
+	if (action == TUN_ADDR_ADD)
+		// Configure IP on interface.
+		ioctl_request = SIOCAIFADDR;
+	else {
+		// Delete IP on interface.
+		assert(action == TUN_ADDR_DELETE);
+		ioctl_request = SIOCDIFADDR;
+	}
+	
+	if (ioctl(ctlfd, ioctl_request, &ifar) < 0) {
 		char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN];
 		ipaddrstr(tunnel->inner_local, local);
 		ipaddrstr(tunnel->inner_remote, remote);
-		fatal("inet %s failed (local %s, remote %s): %m",
-		    tunnel->ifname, local, remote);
+		fatal("inet %s %s failed (local %s, remote %s): %m",
+		    action == TUN_ADDR_ADD ? "add" : "delete",
+		    tunnel->ifname,
+		    local, remote);
 	}
 }
 	
