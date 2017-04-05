@@ -80,9 +80,9 @@ static int destroy(uint32_t key, size_t keylen, void *routep, void *unused);
 static void collapse(Tunnel *tunnel);
 static int expire(uint32_t key, size_t keylen, void *routep, void *statep);
 static void usage(const char *restrict prog);
-static int tunnelfindbyname(uint32_t key, uint32_t keylen, void *datum,
+static int tunnelfindbyname(uint32_t key, size_t keylen, void *datum,
    void *arg);
-static int tunnelfindbydest(uint32_t key, uint32_t keylen, void *datum,
+static int tunnelfindbydest(uint32_t key, size_t keylen, void *datum,
    void *arg);
 static int fix_overlaps(uint32_t key, size_t keylen, void *tunnelp, void *arg);
 static int find_empty(uint32_t key, size_t keylen, void *tunnelp, void *arg);
@@ -439,7 +439,7 @@ learn_route_callback(uint32_t ipnet, uint32_t mask,
 }
 
 static int
-tunnelfindbydest(uint32_t key, uint32_t keylen, void *datum, void *arg)
+tunnelfindbydest(uint32_t key, size_t keylen, void *datum, void *arg)
 {
 	Tunnel *tunnel = datum;
 	TunnelFindByDestParams *params = arg;
@@ -453,7 +453,7 @@ tunnelfindbydest(uint32_t key, uint32_t keylen, void *datum, void *arg)
 }
 
 static int
-tunnelfindbyname(uint32_t key, uint32_t keylen, void *datum, void *arg)
+tunnelfindbyname(uint32_t key, size_t keylen, void *datum, void *arg)
 {
 	Tunnel *tunnel = datum;
 	TunnelFindByNameParams *params = arg;
@@ -895,7 +895,7 @@ dump_tunnel(uint32_t key, size_t keylen, void *tunnelp, void *arg)
 		ipaddrstr(route->ipnet, net);
 		cidr = netmask2cidr(route->subnetmask);
 
-		fprintf(out, "\t\t%s/%d\n", net, cidr);
+		fprintf(out, "\t\t%s/%zd\n", net, cidr);
 	}
 
 	return 0;
