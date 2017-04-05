@@ -832,6 +832,9 @@ tunnel_configure_inner(Tunnel *tunnel, TunnelAddrAction action)
 	struct sockaddr_in addr;
 	struct in_aliasreq ifar;
 
+	memset(&ifar, 0, sizeof(ifar));
+	memset(&addr, 0, sizeof(addr));
+
 	strlcpy(ifar.ifra_name, tunnel->ifname, sizeof(ifar.ifra_name));
 
 	addr.sin_len = sizeof(addr);
