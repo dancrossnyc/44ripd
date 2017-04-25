@@ -722,6 +722,18 @@ chroute(Route *route, Tunnel *tunnel, int rtable)
 		return addroute(route, tunnel, rtable);
 	}
 
+	//
+	// If the gaining tunnel bases its inner endpoint on the route
+	// being gained then there's no need to make any change, the
+	// kernel will have already added the route when the gaining tunnel
+	// was brought up.
+	//
+	if (route->subnetmask == hostmask &&
+	    route->ipnet == tunnel->inner_remote)
+	{
+		return 0;
+	}
+
 	Routemsg rtmsg;
 
 	size_t len = buildrtmsg(RTM_CHANGE, route, tunnel, rtable, &rtmsg);
