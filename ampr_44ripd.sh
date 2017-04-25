@@ -6,7 +6,10 @@
 #
 . /etc/rc.subr
 
-load_rc_config ampr_44ripd
+name=ampr_44ripd
+rcvar=`set_rcvar`
+
+load_rc_config ${name}
 
 : ${ampr_44ripd_enable:="NO"}
 
@@ -27,14 +30,14 @@ case "$1" in
     if [ ${ampr_44ripd_enable} == 0 ]; then
       exit 0
     fi
-    echo "Starting 44ripd..."
+    echo -n "Starting 44ripd..."
     ${ampr_44ripd_prog} ${ampr_44ripd_options} ${ampr_44ripd_local_ip} ${ampr_44ripd_ampr_ip}
     echo $! > ${PIDFILE}
     echo "done"
   ;;
 
   "stop")
-    echo "Stopping 44ripd..."
+    echo -n "Stopping 44ripd..."
     if [ -f ${PIDFILE} ] ; then
       kill `cat ${PIDFILE}`
       rm ${PIDFILE}
@@ -45,7 +48,7 @@ case "$1" in
   ;;
 
   "restart")
-    echo "Restarting 44ripd..."
+    echo -n "Restarting 44ripd..."
     $0 stop
     sleep 2
     $0 start
