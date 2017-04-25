@@ -8,7 +8,7 @@
 #include <stdlib.h>
 
 #include "dat.h"
-#include "fns.h"
+#include "lib.h"
 
 typedef struct Entry Entry;
 struct Entry {

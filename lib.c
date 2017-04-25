@@ -3,22 +3,11 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdlib.h>
-#include <syslog.h>
+#include <string.h>
 
 #include "dat.h"
-#include "fns.h"
-
-uint32_t
-readnet32(const octet data[static 4])
-{
-	return data[0] << 24 | data[1] << 16 | data[2] << 8 | data[3];
-}
-
-uint16_t
-readnet16(const octet data[static 2])
-{
-	return data[0] << 8 | data[1];
-}
+#include "lib.h"
+#include "log.h"
 
 /*
  * If 'netmask' is a valid IPv4 network mask, then '(1 + ~netmask)' will
@@ -72,9 +61,14 @@ ipmapnearest(IPMap *map, uint32_t key, size_t keylen)
 			break;
 		rkey >>= map->keylen;
 		keylen -= map->keylen;
-		if (keylen == 0)
-			return map->datum;
-		parent = map;
+		if (keylen == 0) {
+			if (map->datum != NULL)
+				return map->datum;
+			else
+				break;
+		}
+		if (map->datum != NULL)
+			parent = map;
 		map = (rkey & 0x01) ? map->right : map->left;
 	}
 	if (parent == NULL)
@@ -334,27 +328,55 @@ ipmapremove(IPMap *root, uint32_t key, size_t akeylen)
 	return NULL;
 }
 
-static void
+static int
 ipmapdorec(IPMap *map, uint32_t key, size_t keylen,
-    void (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
+    int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
     void *arg)
 {
-	if (map == NULL) return;
+	if (map == NULL) return 0;
 	key |= (map->key << keylen);
 	keylen += map->keylen;
-	ipmapdorec(map->left, key, keylen, thunk, arg);
+	if (ipmapdorec(map->left, key, keylen, thunk, arg))
+		return 1;
 	if (map->datum != NULL)
-		thunk(revbits(key), keylen, map->datum, arg);
-	ipmapdorec(map->right, key, keylen, thunk, arg);
+		if (thunk(revbits(key), keylen, map->datum, arg))
+			return 1;
+	return ipmapdorec(map->right, key, keylen, thunk, arg);
+}
+
+// Iterate from middle, then left, then right.
+static int
+ipmapdorectopdown(IPMap *map, uint32_t key, size_t keylen,
+    int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
+    void *arg)
+{
+	if (map == NULL) return 0;
+	key |= (map->key << keylen);
+	keylen += map->keylen;
+	if (map->datum != NULL)
+		if (thunk(revbits(key), keylen, map->datum, arg))
+			return 1;
+	if (ipmapdorectopdown(map->left, key, keylen, thunk, arg))
+		return 1;
+	return ipmapdorectopdown(map->right, key, keylen, thunk, arg);
 }
 
 void
 ipmapdo(IPMap *map,
-    void (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
+    int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
     void *arg)
 {
 	if (map != NULL)
 		ipmapdorec(map, 0, 0, thunk, arg);
+}
+
+void
+ipmapdotopdown(IPMap *map,
+    int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
+    void *arg)
+{
+	if (map != NULL)
+		ipmapdorectopdown(map, 0, 0, thunk, arg);
 }
 
 Bitvec *
@@ -384,6 +406,9 @@ bitset(Bitvec *bits, size_t bit)
 		if (words == NULL)
 			fatal("malloc failed");
 		bits->words = words;
+		size_t newwords = word - bits->nwords + 1;
+		memset(&bits->words[bits->nwords], 0,
+		    sizeof(words[0])*newwords);
 		bits->nwords = word + 1;
 	}
 	bits->words[word] |= (1ULL << (bit%64));
@@ -410,7 +435,7 @@ bitclr(Bitvec *bits, size_t bit)
 }
 
 int
-bitget(Bitvec *bits, size_t bit)
+bitget(const Bitvec *bits, size_t bit)
 {
 	size_t word;
 
@@ -428,56 +453,4 @@ nextbit(Bitvec *bits)
 	while (bitget(bits, bits->firstclr) == 1)
 		++bits->firstclr;
 	return bits->firstclr;
-}
-
-void
-initlog(void)
-{
-	openlog("44ripd", LOG_CONS | LOG_PERROR | LOG_PID, LOG_LOCAL0);
-}
-
-void
-debug(const char *fmt, ...)
-{
-	va_list ap;
-	va_start(ap, fmt);
-	vsyslog(LOG_DEBUG, fmt, ap);
-	va_end(ap);
-}
-
-void
-info(const char *fmt, ...)
-{
-	va_list ap;
-	va_start(ap, fmt);
-	vsyslog(LOG_INFO, fmt, ap);
-	va_end(ap);
-}
-
-void
-notice(const char *fmt, ...)
-{
-	va_list ap;
-	va_start(ap, fmt);
-	vsyslog(LOG_INFO, fmt, ap);
-	va_end(ap);
-}
-
-void
-error(const char *fmt, ...)
-{
-	va_list ap;
-	va_start(ap, fmt);
-	vsyslog(LOG_INFO, fmt, ap);
-	va_end(ap);
-}
-
-void
-fatal(const char *fmt, ...)
-{
-	va_list ap;
-	va_start(ap, fmt);
-	vsyslog(LOG_INFO, fmt, ap);
-	va_end(ap);
-	exit(EXIT_FAILURE);
 }
