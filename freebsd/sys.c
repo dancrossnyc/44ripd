@@ -823,7 +823,7 @@ tunnel_rebase(Tunnel *tunnel, Route *route, int rtable)
 	Route *other;
 	for (other = tunnel->routes; other != NULL; other = other->rnext)
 		if (other != route && other != newrt)
-			addroute(route, tunnel, rtable);
+			addroute(other, tunnel, rtable);
 }
 
 static void
