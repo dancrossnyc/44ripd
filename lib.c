@@ -459,7 +459,7 @@ notice(const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
-	vsyslog(LOG_INFO, fmt, ap);
+	vsyslog(LOG_NOTICE, fmt, ap);
 	va_end(ap);
 }
 
@@ -468,7 +468,7 @@ error(const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
-	vsyslog(LOG_INFO, fmt, ap);
+	vsyslog(LOG_ERR, fmt, ap);
 	va_end(ap);
 }
 
@@ -477,7 +477,7 @@ fatal(const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
-	vsyslog(LOG_INFO, fmt, ap);
+	vsyslog(LOG_ERR, fmt, ap);
 	va_end(ap);
 	exit(EXIT_FAILURE);
 }
