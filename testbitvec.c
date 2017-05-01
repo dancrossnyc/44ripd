@@ -14,7 +14,7 @@ main(void)
 	for (int k = 0; k < 65; k++) {
 		size_t bit = nextbit(bv);
 		if (bit != k) {
-			printf("bit != k: %zu, %d\n", bit, k);
+			fprintf(stderr, "bit != k: %zu, %d\n", bit, k);
 			exit(EXIT_FAILURE);
 		}
 		assert(bitget(bv, k) == 0);

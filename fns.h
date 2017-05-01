@@ -13,6 +13,9 @@ int netmask2cidr(uint32_t netmask);
 uint32_t revbits(uint32_t w);
 IPMap *mkipmap(void);
 void freeipmap(IPMap *map, void (*freedatum)(void *));
+int ipmapdo_preorder(IPMap *map, int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg), void *arg);
+int ipmapdo_inorder(IPMap *map, int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg), void *arg);
+int ipmapdo_postorder(IPMap *map, int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg), void *arg);
 void ipmapdo(IPMap *map, void (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg), void *arg);
 void *ipmapinsert(IPMap *map, uint32_t key, size_t keylen, void *datum);
 void *ipmapremove(IPMap *map, uint32_t key, size_t keylen);
@@ -43,3 +46,4 @@ void fatal(const char *restrict fmt, ...);
 #ifdef USE_COMPAT
 void *reallocarray(void *p, size_t nelem, size_t size);
 #endif  // USE_COMPAT
+void *recallocarray(void *p, size_t oelem, size_t nelem, size_t size);

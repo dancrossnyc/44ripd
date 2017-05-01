@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <syslog.h>
+#include <string.h>
 
 #include "dat.h"
 #include "fns.h"
@@ -72,9 +73,10 @@ ipmapnearest(IPMap *map, uint32_t key, size_t keylen)
 			break;
 		rkey >>= map->keylen;
 		keylen -= map->keylen;
+		if (map->datum != NULL)
+			parent = map;
 		if (keylen == 0)
-			return map->datum;
-		parent = map;
+			break;
 		map = (rkey & 0x01) ? map->right : map->left;
 	}
 	if (parent == NULL)
@@ -334,18 +336,82 @@ ipmapremove(IPMap *root, uint32_t key, size_t akeylen)
 	return NULL;
 }
 
-static void
-ipmapdorec(IPMap *map, uint32_t key, size_t keylen,
-    void (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
+enum
+{
+	IPMAP_PREORDER = -1,
+	IPMAP_INORDER,
+	IPMAP_POSTORDER,
+};
+
+static inline int
+ipmapdorec(IPMap *map, int order,
+    uint32_t key, size_t keylen,
+    int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
     void *arg)
 {
-	if (map == NULL) return;
+	int r = 0;
+
+	if (map == NULL) return r;
 	key |= (map->key << keylen);
 	keylen += map->keylen;
-	ipmapdorec(map->left, key, keylen, thunk, arg);
-	if (map->datum != NULL)
-		thunk(revbits(key), keylen, map->datum, arg);
-	ipmapdorec(map->right, key, keylen, thunk, arg);
+	if (order == IPMAP_PREORDER && map->datum != NULL) {
+		r = thunk(revbits(key), keylen, map->datum, arg);
+		if (r != 0) return r;
+	}
+	r = ipmapdorec(map->left, order, key, keylen, thunk, arg);
+	if (r != 0) return r;
+	if (order == IPMAP_INORDER && map->datum != NULL) {
+		r = thunk(revbits(key), keylen, map->datum, arg);
+		if (r != 0) return r;
+	}
+	r = ipmapdorec(map->right, order, key, keylen, thunk, arg);
+	if (r != 0) return r;
+	if (order == IPMAP_POSTORDER && map->datum != NULL)
+		r = thunk(revbits(key), keylen, map->datum, arg);
+
+	return r;
+}
+
+int
+ipmapdo_preorder(IPMap *map,
+    int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
+    void *arg)
+{
+	return ipmapdorec(map, IPMAP_PREORDER, 0, 0, thunk, arg);
+}
+
+int
+ipmapdo_inorder(IPMap *map,
+    int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
+    void *arg)
+{
+	return ipmapdorec(map, IPMAP_INORDER, 0, 0, thunk, arg);
+}
+
+int
+ipmapdo_postorder(IPMap *map,
+    int (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
+    void *arg)
+{
+	return ipmapdorec(map, IPMAP_POSTORDER, 0, 0, thunk, arg);
+}
+
+typedef struct TrampArg TrampArg;
+struct TrampArg {
+	void (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg);
+	void *arg;
+};
+
+static int
+trampthunk(uint32_t key, size_t keylen, void *datum, void *arg)
+{
+	TrampArg *tramparg = arg;
+
+	if (tramparg == NULL)
+		return -1;
+	tramparg->thunk(key, keylen, datum, tramparg->arg);
+
+	return 0;
 }
 
 void
@@ -353,8 +419,13 @@ ipmapdo(IPMap *map,
     void (*thunk)(uint32_t key, size_t keylen, void *datum, void *arg),
     void *arg)
 {
-	if (map != NULL)
-		ipmapdorec(map, 0, 0, thunk, arg);
+	TrampArg tramparg;
+
+	memset(&tramparg, 0, sizeof tramparg);
+	tramparg.thunk = thunk;
+	tramparg.arg = arg;
+
+	ipmapdo_inorder(map, trampthunk, &tramparg);
 }
 
 Bitvec *
@@ -380,7 +451,7 @@ bitset(Bitvec *bits, size_t bit)
 	assert(bits != NULL);
 	word = bit/64;
 	if (word >= bits->nwords) {
-		words = reallocarray(bits->words, word + 1, sizeof(uint64_t));
+		words = recallocarray(bits->words, bits->nwords, word + 1, sizeof(uint64_t));
 		if (words == NULL)
 			fatal("malloc failed");
 		bits->words = words;
