@@ -70,10 +70,12 @@ enum {
 	CIDR_HOST = 32,
 	RIPV2_PORT = 520,
 	DEFAULT_ROUTE_TABLE = 44,
-	TIMEOUT = 7*24*60*60,	// 7 days
+	//TIMEOUT = 7*24*60*60,	// 7 days
+	TIMEOUT = 15*60,	// 15 minutes.
 };
 
 const char *DEFAULT_LOCAL_ADDRESS = "23.30.150.141";
+const char *DEFAULT_GATEWAY_ADDRESS = "169.228.66.251";
 const char *RIPV2_GROUP = "224.0.0.9";
 const char *PASSWORD = "pLaInTeXtpAsSwD";
 
@@ -85,6 +87,7 @@ Bitvec *staticinterfaces;
 
 const char *prog;
 uint32_t localaddr;
+uint32_t defgwaddr;
 int routetable;
 int lowgif;
 
@@ -159,7 +162,11 @@ init(int argc, char *argv[])
 	sd = initsock(RIPV2_GROUP, RIPV2_PORT, routetable);
 	memset(&addr, 0, sizeof(addr));
 	inet_pton(AF_INET, localip, &addr);
-	localaddr = addr.s_addr;
+	localaddr = ntohl(addr.s_addr);
+
+	memset(&addr, 0, sizeof(addr));
+	inet_pton(AF_INET, DEFAULT_GATEWAY_ADDRESS, &addr);
+	defgwaddr = ntohl(addr.s_addr);
 
 	initlog();
 	if (daemonize) {
@@ -257,7 +264,7 @@ ripresponse(RIPResponse *response, time_t now)
 		return;
 	}
 	tunnel = ipmapfind(tunnels, response->nexthop, CIDR_HOST);
-	if (tunnel == NULL) {
+	if (tunnel == NULL && defgwaddr != response->nexthop) {
 		tunnel = mktunnel(localaddr, response->nexthop);
 		alloctunif(tunnel, interfaces);
 		uptunnel(tunnel, routetable);
