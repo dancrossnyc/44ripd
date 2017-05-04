@@ -74,7 +74,7 @@ initsock(const char *restrict group, int port, int rtable)
 	inet_pton(AF_INET, group, &mr.imr_multiaddr.s_addr);
 	mr.imr_interface.s_addr = htonl(INADDR_ANY);
 	if (setsockopt(sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mr, sizeof(mr)) < 0)
-		err(EXIT_FAILURE, "setsockopt");
+		err(EXIT_FAILURE, "setsockopt IP_ADD_MEMBERSHIP");
 
 	return sd;
 }

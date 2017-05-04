@@ -168,12 +168,12 @@ init(int argc, char *argv[])
 	inet_pton(AF_INET, DEFAULT_GATEWAY_ADDRESS, &addr);
 	defgwaddr = ntohl(addr.s_addr);
 
-	initlog();
 	if (daemonize) {
-		const int chdiryes = 1;
-		const int closeyes = 1;
+		const int chdiryes = 0;
+		const int closeyes = 0;
 		daemon(chdiryes, closeyes);
 	}
+	initlog();
 
 	return sd;
 }
