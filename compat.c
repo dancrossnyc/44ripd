@@ -21,8 +21,6 @@ reallocarray(void *p, size_t nelem, size_t size)
 	return realloc(p, nelem*size);
 }
 
-#endif  // USE_COMPAT
-
 void *
 recallocarray(void *p, size_t oelem, size_t nelem, size_t size)
 {
@@ -38,3 +36,5 @@ recallocarray(void *p, size_t oelem, size_t nelem, size_t size)
 
 	return np;
 }
+
+#endif  // USE_COMPAT

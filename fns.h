@@ -45,5 +45,5 @@ void fatal(const char *restrict fmt, ...);
 
 #ifdef USE_COMPAT
 void *reallocarray(void *p, size_t nelem, size_t size);
-#endif  // USE_COMPAT
 void *recallocarray(void *p, size_t oelem, size_t nelem, size_t size);
+#endif  // USE_COMPAT
