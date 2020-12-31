@@ -135,7 +135,7 @@ uptunnel(Tunnel *tunnel, int rtable)
 	memmove(&ifar.ifra_mask, &addr, sizeof(addr));
 
 	// Configure the tunnel.
-	if (ioctl(ctlfd, SIOCSIFPHYADDR, &ifar) < 0) {
+	if (ioctl(ctlfd, SIOCSLIFPHYADDR, &ifar) < 0) {
 		char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN];
 
 		inet_ntop(AF_INET, &tunnel->local, local, sizeof(local));

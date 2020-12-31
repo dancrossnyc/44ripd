@@ -1,5 +1,5 @@
 #
-CC=			egcc
+CC=			cc
 FLAGS=			-Wall -Werror -ansi -pedantic -std=c11 -I. -Iopenbsd # -DUSE_COMPAT
 CFLAGS=			$(FLAGS) -g
 SRCS=			main.c rip.c lib.c openbsd/sys.c compat.c
