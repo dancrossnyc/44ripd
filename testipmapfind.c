@@ -7,7 +7,7 @@
 
 #include "dat.h"
 #include "fns.h"
-
+#include "testfns.h"
 
 IPMap root, a, b, c, d, e;
 const char *av = "a";
@@ -15,12 +15,6 @@ const char *bv = "b";
 const char *cv = "c";
 const char *dv = "d";
 const char *ev = "e";
-
-uint32_t
-mkkey(const char *addr)
-{
-	return ntohl(inet_addr(addr));
-}
 
 void
 setup(void)

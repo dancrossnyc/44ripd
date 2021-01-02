@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <net/if_dl.h>
 #include <net/route.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -15,6 +16,7 @@
 #include <limits.h>
 #include <stdalign.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -34,14 +36,14 @@ initsys(int rtable)
 
 	ctlfd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (ctlfd < 0)
-		err(EXIT_FAILURE, "ctl socket");
+		fatal("ctl socket: %m");
 	rtfd = socket(PF_ROUTE, SOCK_RAW, AF_INET);
 	if (rtfd < 0)
-		err(EXIT_FAILURE, "route socket");
+		fatal("route socket: %m");
 	if (shutdown(rtfd, SHUT_RD) < 0)
-		err(EXIT_FAILURE, "route shutdown read");
-	//if (setsockopt(rtfd, SOL_SOCKET, SO_RTABLE, &rtable, sizeof(rtable)) < 0)
-	//	err(EXIT_FAILURE, "setsockopt rtfd SO_RTABLE");
+		fatal("route shutdown read: %m");
+	if (0 && setsockopt(rtfd, SOL_SOCKET, SO_RTABLE, &rtable, sizeof(rtable)) < 0)
+		fatal("setsockopt rtfd SO_RTABLE: %m");
 
 	// Create prototype tunnel netmask.
 	memset(&addr, 0, sizeof(addr));
@@ -50,37 +52,49 @@ initsys(int rtable)
 }
 
 int
-initsock(const char *restrict group, int port, int rtable)
+initsock(const char *restrict iface, const char *restrict group, int port, int rtable)
 {
 	int sd, on;
+	uint32_t ifaddr;
 	struct sockaddr_in sin;
 	struct ip_mreq mr;
 
-	sd = socket(PF_INET, SOCK_DGRAM, 0);
+	ifaddr = htonl(INADDR_ANY);
+	if (strcmp(iface, "*") != 0) {
+		struct in_addr addr;
+		memset(&addr, 0, sizeof(addr));
+		if (inet_pton(AF_INET, iface, &addr) < 0)
+			fatal("bad interface address: %m");
+		ifaddr = addr.s_addr;
+	}
+
+	sd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sd < 0)
-		err(EXIT_FAILURE, "socket");
+		fatal("socket: %m");
 	on = 1;
 	if (setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
-		err(EXIT_FAILURE, "setsockopt SO_REUSEADDR");
-	if (setsockopt(sd, SOL_SOCKET, SO_RTABLE, &rtable, sizeof(rtable)) < 0)
-		err(EXIT_FAILURE, "setsockopt SO_RTABLE");
+		fatal("setsockopt SO_REUSEADDR: %m");
+	// On OpenBSD, we use the `route` command to set the listening rtable.
+	if (0 && setsockopt(sd, SOL_SOCKET, SO_RTABLE, &rtable, sizeof(rtable)) < 0)
+		fatal("setsockopt SO_RTABLE: %m");
 	memset(&sin, 0, sizeof(sin));
 	sin.sin_family = AF_INET;
 	sin.sin_port = htons(port);
-	sin.sin_addr.s_addr = htonl(INADDR_ANY);
+	sin.sin_addr.s_addr = ifaddr;
 	if (bind(sd, (struct sockaddr *)&sin, sizeof(sin)) < 0)
-		err(EXIT_FAILURE, "bind");
+		fatal("bind: %m");
 	memset(&mr, 0, sizeof(mr));
 	inet_pton(AF_INET, group, &mr.imr_multiaddr.s_addr);
-	mr.imr_interface.s_addr = htonl(INADDR_ANY);
+	mr.imr_interface.s_addr = ifaddr;
 	if (setsockopt(sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mr, sizeof(mr)) < 0)
-		err(EXIT_FAILURE, "setsockopt IP_ADD_MEMBERSHIP");
+		fatal("setsockopt IP_ADD_MEMBERSHIP: %m");
 
 	return sd;
 }
 
 /*
- * Bring a tunnel up, routing against rtable.
+ * Bring a tunnel up in routing domain `rdomain`, with
+ * the tunnel endpoints routing in `tunneldomain`.
  *
  * Note that the ordering of steps matters here.
  * In particular, we cannot configure IP until we
@@ -97,10 +111,11 @@ initsock(const char *restrict group, int port, int rtable)
  * 6. Configure IP on the interface.
  */
 int
-uptunnel(Tunnel *tunnel, int rtable)
+uptunnel(Tunnel *tunnel, int rdomain, int tunneldomain)
 {
 	struct ifreq ifr;
-	struct ifaliasreq ifar;
+	struct if_laddrreq tr;
+	struct ifaliasreq ir;
 	struct sockaddr_in addr;
 
 	assert(tunnel != NULL);
@@ -108,51 +123,47 @@ uptunnel(Tunnel *tunnel, int rtable)
 
 	// Zero everything.
 	memset(&ifr, 0, sizeof(ifr));
-	memset(&ifar, 0, sizeof(ifar));
+	memset(&tr, 0, sizeof(tr));
+	memset(&ir, 0, sizeof(ir));
 	memset(&addr, 0, sizeof(addr));
 
 	// Create the interface.
 	strlcpy(ifr.ifr_name, tunnel->ifname, sizeof(ifr.ifr_name));
 	if (ioctl(ctlfd, SIOCIFCREATE, &ifr) < 0)
-		err(EXIT_FAILURE, "create %s failed", tunnel->ifname);
+		fatal("create %s failed: %m", tunnel->ifname);
 
-	// Initialize the alias structure.  This is used for both
-	// configuring the tunnel and IP.
-	strlcpy(ifar.ifra_name, tunnel->ifname, sizeof(ifar.ifra_name));
+	// Initialize the tunnel.
+	strlcpy(tr.iflr_name, tunnel->ifname, sizeof(tr.iflr_name));
 
 	addr.sin_len = sizeof(addr);
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = htonl(tunnel->local);
-	assert(sizeof(addr) <= sizeof(ifar.ifra_addr));
-	memmove(&ifar.ifra_addr, &addr, sizeof(addr));
+	assert(sizeof(addr) <= sizeof(tr.addr));
+	memmove(&tr.addr, &addr, sizeof(addr));
 
 	addr.sin_addr.s_addr = htonl(tunnel->remote);
-	assert(sizeof(addr) <= sizeof(ifar.ifra_dstaddr));
-	memmove(&ifar.ifra_dstaddr, &addr, sizeof(addr));
-
-	addr.sin_addr.s_addr = htonl(hostmask);
-	assert(sizeof(addr) <= sizeof(ifar.ifra_mask));
-	memmove(&ifar.ifra_mask, &addr, sizeof(addr));
+	assert(sizeof(addr) <= sizeof(tr.dstaddr));
+	memmove(&tr.dstaddr, &addr, sizeof(addr));
 
 	// Configure the tunnel.
-	if (ioctl(ctlfd, SIOCSLIFPHYADDR, &ifar) < 0) {
+	if (ioctl(ctlfd, SIOCSLIFPHYADDR, &tr) < 0) {
 		char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN];
-
-		inet_ntop(AF_INET, &tunnel->local, local, sizeof(local));
-		inet_ntop(AF_INET, &tunnel->remote, remote, sizeof(remote));
-		err(EXIT_FAILURE, "tunnel %s failed (local %s remote %s)",
+		ipaddrstr(htonl(tunnel->local), local);
+		ipaddrstr(htonl(tunnel->remote), remote);
+		fatal("tunnel %s failed (local %s remote %s): %m",
 		    tunnel->ifname, local, remote);
 	}
 
 	// Set the tunnnel routing domain.
-	ifr.ifr_rdomainid = rtable;
+	ifr.ifr_rdomainid = tunneldomain;
 	if (ioctl(ctlfd, SIOCSLIFPHYRTABLE, &ifr) < 0)
-		err(EXIT_FAILURE, "cannot set tunnel routing table %s",
+		fatal("cannot set tunnel routing table %s: %m",
 		    tunnel->ifname);
 
 	// Set the interface routing domain.
+	ifr.ifr_rdomainid = rdomain;
 	if (ioctl(ctlfd, SIOCSIFRDOMAIN, &ifr) < 0)
-		err(EXIT_FAILURE, "cannot set interface routing table %s",
+		fatal("cannot set interface routing table %s: %m",
 		    tunnel->ifname);
 
 	// Bring the interface up and mark running.
@@ -161,20 +172,21 @@ uptunnel(Tunnel *tunnel, int rtable)
 	// IFF_ALLMULTI|IFF_MULTICAST) as the kernel does not allow
 	// userspace programs to modify those flags.
 	if (ioctl(ctlfd, SIOCGIFFLAGS, &ifr) < 0)
-		err(EXIT_FAILURE, "cannot get flags for %s", tunnel->ifname);
+		fatal("cannot get flags for %s: %m", tunnel->ifname);
 	ifr.ifr_flags |= (IFF_UP | IFF_RUNNING);
 	if (ioctl(ctlfd, SIOCSIFFLAGS, &ifr) < 0)
-		err(EXIT_FAILURE, "cannot set flags for %s", tunnel->ifname);
+		fatal("cannot set flags for %s: %m", tunnel->ifname);
 
-	// Configure IP on interface.
-	if (ioctl(ctlfd, SIOCAIFADDR, &ifar) < 0) {
-		char local[INET_ADDRSTRLEN], remote[INET_ADDRSTRLEN];
-
-		inet_ntop(AF_INET, &tunnel->local, local, sizeof(local));
-		inet_ntop(AF_INET, &tunnel->remote, remote, sizeof(remote));
-		err(EXIT_FAILURE, "inet %s failed (local %s, remote %s)",
-		    tunnel->ifname, local, remote);
-	}
+	// Configure IP on the interface.  Ideally, this wouldn't be
+	// necessary, so we just configure it with the 0 address as
+	// a dummy.
+	strlcpy(ir.ifra_name, tunnel->ifname, sizeof(ir.ifra_name));
+	addr.sin_addr.s_addr = htonl(0);
+	memmove(&ir.ifra_addr, &addr, sizeof(addr));
+	addr.sin_addr.s_addr = htonl(0xFFFFFFFF);
+	memmove(&ir.ifra_mask, &addr, sizeof(addr));
+	if (ioctl(ctlfd, SIOCAIFADDR, &ir) < 0)
+		fatal("dummy inet %s failed: %m", tunnel->ifname);
 
 	return 0;
 }
@@ -189,7 +201,7 @@ downtunnel(Tunnel *tunnel)
 	memset(&ifr, 0, sizeof(ifr));
 	strlcpy(ifr.ifr_name, tunnel->ifname, sizeof(ifr.ifr_name));
 	if (ioctl(ctlfd, SIOCIFDESTROY, &ifr) < 0)
-		err(EXIT_FAILURE, "destroying %s failed", tunnel->ifname);
+		fatal("destroying %s failed: %m", tunnel->ifname);
 
 	return 0;
 }
@@ -198,20 +210,19 @@ typedef struct Routemsg Routemsg;
 struct Routemsg {
 	alignas(long) struct rt_msghdr header;
 	alignas(long) struct sockaddr_in dst;
-	alignas(long) struct sockaddr_in gw;
+	alignas(long) struct sockaddr_dl gw;
 	alignas(long) struct sockaddr_in netmask;
 };
 
 static size_t
-buildrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
+mkrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
 {
 	static int seqno = 0;
 	struct rt_msghdr *header;
-	struct sockaddr_in *dst, *gw, *netmask;
+	struct sockaddr_in *dst, *netmask;
+	struct sockaddr_dl *gw;
 
 	assert(route != NULL);
-	if (cmd != RTM_DELETE)
-		assert(tunnel != NULL);
 	assert(rtable >= 0);
 	assert(msg != NULL);
 
@@ -225,7 +236,7 @@ buildrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
 	header->rtm_addrs = RTA_DST | RTA_NETMASK;
 	if (cmd != RTM_DELETE)
 		header->rtm_addrs |= RTA_GATEWAY;
-	header->rtm_flags = RTF_UP /* | RTF_STATIC */;
+	header->rtm_flags = RTF_UP | RTF_LLINFO | RTF_CONNECTED;
 	header->rtm_fmask = 0;
 	header->rtm_pid = getpid();
 	header->rtm_seq = seqno++;
@@ -237,23 +248,26 @@ buildrtmsg(int cmd, Route *route, Tunnel *tunnel, int rtable, Routemsg *msg)
 	dst->sin_family = AF_INET;
 	dst->sin_addr.s_addr = htonl(route->ipnet);
 
-	netmask = &msg->gw;
+	// XXX: copy this into a manually aligned byte buffer.
+	// This is surely undefined behavior.
+	netmask = (struct sockaddr_in *)&msg->gw;
 	if (cmd != RTM_DELETE) {
 		netmask = &msg->netmask;
 		gw = &msg->gw;
-		gw->sin_len = sizeof(*gw);
-		gw->sin_family = AF_INET;
-		gw->sin_addr.s_addr = htonl(tunnel->remote);
+		gw->sdl_len = sizeof(*gw);
+		gw->sdl_family = AF_LINK;
+		gw->sdl_index = if_nametoindex(tunnel->ifname);
 	}
 
 	netmask->sin_len = sizeof(*netmask);
 	netmask->sin_family = AF_INET;
 	netmask->sin_addr.s_addr = htonl(route->subnetmask);
+
 	if (cmd == RTM_DELETE)
 		header->rtm_msglen -= sizeof(*gw);
 
-	header->rtm_flags |=
-	    (route->subnetmask == hostmask) ? RTF_HOST : RTF_GATEWAY;
+	if (route->subnetmask == hostmask)
+		header->rtm_flags |= RTF_HOST; 
 
 	return header->rtm_msglen;
 }
@@ -264,9 +278,12 @@ addroute(Route *route, Tunnel *tunnel, int rtable)
 	Routemsg rtmsg;
 	size_t len;
 
-	len = buildrtmsg(RTM_ADD, route, tunnel, rtable, &rtmsg);
-	if (write(rtfd, &rtmsg, len) != len)
-		err(EXIT_FAILURE, "route add failure");
+	len = mkrtmsg(RTM_ADD, route, tunnel, rtable, &rtmsg);
+	if (write(rtfd, &rtmsg, len) != len) {
+		char proute[128];
+		routestr(route, tunnel, proute, sizeof(proute));
+		error("route add failure (%s): %m", proute);
+	}
 
 	return 0;
 }
@@ -277,13 +294,15 @@ chroute(Route *route, Tunnel *tunnel, int rtable)
 	Routemsg rtmsg;
 	size_t len;
 
-	len = buildrtmsg(RTM_CHANGE, route, tunnel, rtable, &rtmsg);
+	len = mkrtmsg(RTM_CHANGE, route, tunnel, rtable, &rtmsg);
 	if (write(rtfd, &rtmsg, len) != len) {
 		if (errno == ESRCH) {
 			rmroute(route, rtable);
 			return addroute(route, tunnel, rtable);
 		}
-		err(EXIT_FAILURE, "route change failure");
+		char proute[128];
+		routestr(route, tunnel, proute, sizeof(proute));
+		error("route change failure (%s): %m", proute);
 	}
 
 	return 0;
@@ -295,10 +314,13 @@ rmroute(Route *route, int rtable)
 	Routemsg rtmsg;
 	size_t len;
 
-	len = buildrtmsg(RTM_DELETE, route, NULL, rtable, &rtmsg);
+	len = mkrtmsg(RTM_DELETE, route, NULL, rtable, &rtmsg);
 	if (write(rtfd, &rtmsg, len) != len)
-		if (errno != ESRCH)
-			err(EXIT_FAILURE, "route change failure");
+		if (errno != ESRCH) {
+			char proute[128];
+			routestr(route, NULL, proute, sizeof(proute));
+			error("route remove failure (%s): %m", proute);
+		}
 
 	return 0;
 }
@@ -307,4 +329,24 @@ void
 ipaddrstr(uint32_t addr, char buf[static INET_ADDRSTRLEN])
 {
 	inet_ntop(AF_INET, &addr, buf, INET_ADDRSTRLEN);
+}
+
+void
+routestr(Route *route, Tunnel *tunnel, char *buf, size_t size)
+{
+	char gw[INET_ADDRSTRLEN], proute[INET_ADDRSTRLEN];
+	size_t cidr;
+
+	assert(route != NULL);
+	cidr = netmask2cidr(route->subnetmask);
+	ipaddrstr(route->ipnet, proute);
+	ipaddrstr(route->gateway, gw);
+
+	assert(buf != NULL);
+	snprintf(buf, size, "%s/%zu -> %s", proute, cidr, gw);
+	if (tunnel != NULL) {
+		assert(tunnel->ifname != NULL);
+		strlcat(buf, " on ", size);
+		strlcat(buf, tunnel->ifname, size);
+	}
 }

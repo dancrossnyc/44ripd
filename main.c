@@ -52,7 +52,6 @@
 #include "fns.h"
 
 int init(int argc, char *argv[]);
-unsigned int strnum(const char *restrict str);
 void riptide(int sd);
 void ripresponse(RIPResponse *response, time_t now);
 Route *mkroute(uint32_t ipnet, uint32_t subnetmask, uint32_t gateway);
@@ -88,7 +87,8 @@ Bitvec *staticinterfaces;
 const char *prog;
 uint32_t localaddr;
 uint32_t defgwaddr;
-int routetable;
+int routedomain;
+int tunneldomain;
 int lowgif;
 
 int
@@ -108,6 +108,7 @@ int
 init(int argc, char *argv[])
 {
 	const char *localip;
+	char *iface = "*";
 	char *slash;
 	int sd, ch, daemonize;
 	struct in_addr addr;
@@ -117,20 +118,27 @@ init(int argc, char *argv[])
 	daemonize = 1;
 	interfaces = mkbitvec();
 	staticinterfaces = mkbitvec();
-	routetable = DEFAULT_ROUTE_TABLE;
+	routedomain = DEFAULT_ROUTE_TABLE;
+	tunneldomain = DEFAULT_ROUTE_TABLE;
 	localip = DEFAULT_LOCAL_ADDRESS;
 	routes = mkipmap();
 	tunnels = mkipmap();
-	while ((ch = getopt(argc, argv, "dT:L:I:s:")) != -1) {
+	while ((ch = getopt(argc, argv, "dD:T:L:i:I:s:")) != -1) {
 		switch (ch) {
 		case 'd':
 			daemonize = 0;
 			break;
 		case 'T':
-			routetable = strnum(optarg);
+			tunneldomain = strnum(optarg);
+			break;
+		case 'D':
+			routedomain = strnum(optarg);
 			break;
 		case 'L':
 			localip = optarg;
+			break;
+		case 'i':
+			iface = optarg;
 			break;
 		case 'I': {
 			static void *IGNORE = (void *)0x10;	// Arbitrary.
@@ -158,8 +166,9 @@ init(int argc, char *argv[])
 			usage(prog);
 		}
 	}
-	initsys(routetable);
-	sd = initsock(RIPV2_GROUP, RIPV2_PORT, routetable);
+	initsys(routedomain);
+	sd = initsock(iface, RIPV2_GROUP, RIPV2_PORT, routedomain);
+
 	memset(&addr, 0, sizeof(addr));
 	inet_pton(AF_INET, localip, &addr);
 	localaddr = ntohl(addr.s_addr);
@@ -177,27 +186,6 @@ init(int argc, char *argv[])
 
 	return sd;
 }
-
-enum {
-	MAX_NUM = (1 << 20),
-};
-
-unsigned int
-strnum(const char *restrict str)
-{
-	char *ep;
-	unsigned long r;
-
-	ep = NULL;
-	r = strtoul(str, &ep, 10);
-	if (ep != NULL && *ep != '\0')
-		fatal("bad unsigned integer: %s", str);
-	if (r > MAX_NUM)
-		fatal("integer range error: %s", str);
-
-	return (unsigned int)r;
-}
-
 
 void
 riptide(int sd)
@@ -267,7 +255,7 @@ ripresponse(RIPResponse *response, time_t now)
 	if (tunnel == NULL && defgwaddr != response->nexthop) {
 		tunnel = mktunnel(localaddr, response->nexthop);
 		alloctunif(tunnel, interfaces);
-		uptunnel(tunnel, routetable);
+		uptunnel(tunnel, routedomain, tunneldomain);
 		ipmapinsert(tunnels, response->nexthop, CIDR_HOST, tunnel);
 	}
 	route = ipmapfind(routes, response->ipaddr, cidr);
@@ -282,9 +270,9 @@ ripresponse(RIPResponse *response, time_t now)
 	// The route is new or moved to a different tunnel.
 	if (route->tunnel != tunnel) {
 		if (route->tunnel == NULL)
-			addroute(route, tunnel, routetable);
+			addroute(route, tunnel, routedomain);
 		else
-			chroute(route, tunnel, routetable);
+			chroute(route, tunnel, routedomain);
 		unlinkroute(tunnel, route);
 		unlinkroute(route->tunnel, route);
 		collapse(route->tunnel);
@@ -429,7 +417,7 @@ destroy(uint32_t key, size_t keylen, void *routep, void *unused)
 	tunnel = route->tunnel;
 	assert(tunnel != NULL);
 	unlinkroute(tunnel, route);
-	rmroute(route, routetable);
+	rmroute(route, routedomain);
 	collapse(tunnel);
 }
 

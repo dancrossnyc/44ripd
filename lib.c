@@ -32,7 +32,7 @@ isvalidnetmask(uint32_t netmask)
 	return ((~netmask + 1) & ~netmask) == 0;
 }
 
-int
+unsigned int
 netmask2cidr(uint32_t netmask)
 {
 	int cidr = 32;
@@ -44,6 +44,17 @@ netmask2cidr(uint32_t netmask)
 	}
 
 	return cidr;
+}
+
+uint32_t
+cidr2netmask(unsigned int cidr)
+{
+	if (cidr == 0)
+		return 0;
+	if (cidr > 32)
+		return ~0U;
+
+	return ~0U << (32 - cidr);
 }
 
 /*
@@ -499,6 +510,26 @@ nextbit(Bitvec *bits)
 	while (bitget(bits, bits->firstclr) == 1)
 		++bits->firstclr;
 	return bits->firstclr;
+}
+
+enum {
+	MAX_NUM = (1 << 20),
+};
+
+unsigned int
+strnum(const char *restrict str)
+{
+	char *ep;
+	unsigned long r;
+
+	ep = NULL;
+	r = strtoul(str, &ep, 10);
+	if (ep != NULL && *ep != '\0')
+		fatal("bad unsigned integer: %s", str);
+	if (r > MAX_NUM)
+		fatal("integer range error: %s", str);
+
+	return (unsigned int)r;
 }
 
 void

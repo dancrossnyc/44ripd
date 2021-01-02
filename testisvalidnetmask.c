@@ -305,6 +305,8 @@ main(void)
 	test("255.255.255.255", true);
 
 	// Probe a few other values.
+	test("44.0.0.1", false);
+	test("127.0.0.1", false);
 	test("255.255.191.0", false);
 	test("255.255.254.1", false);
 	test("255.255.254.2", false);
