@@ -24,8 +24,9 @@ int
 main(int argc, char *argv[])
 {
 	Tunnel tunnel;
-	struct in_addr local, remote;
+	struct in_addr local, remote, local44;
 	int ch, rdomain, tunneldomain;
+	uint32_t local44addr;
 
 	rdomain = 0;
 	tunneldomain = 0;
@@ -37,10 +38,11 @@ main(int argc, char *argv[])
 		case 'D':
 			rdomain = strnum(optarg);
 			break;
+			break;
 		case '?':
 		case 'h':
 		default:
-			fatal("usage: uptunnel ifname local remote");
+			fatal("usage: uptunnel ifname local remote endpoint");
 			break;
 		}
 	}
@@ -50,8 +52,8 @@ main(int argc, char *argv[])
 	initlog();
 	initsys(rdomain);
 
-	if (argc != 3)
-		fatal("usage: uptunnel ifname local remote");
+	if (argc != 4)
+		fatal("usage: uptunnel ifname local remote endpoint");
 
 	memset(&local, 0, sizeof(local));
 	if (inet_pton(AF_INET, argv[1], &local) <= 0)
@@ -61,12 +63,17 @@ main(int argc, char *argv[])
 	if (inet_pton(AF_INET, argv[2], &remote) <= 0)
 		fatal("cannot parse remote: %s", argv[2]);
 
+	memset(&local44, 0, sizeof(local44));
+	if (inet_pton(AF_INET, argv[3], &local44) <= 0)
+		fatal("cannot parse local 44: %s", argv[3]);
+	local44addr = ntohl(local44.s_addr);
+
 	memset(&tunnel, 0, sizeof(tunnel));
 	strlcpy(tunnel.ifname, argv[0], sizeof(tunnel.ifname));
 	tunnel.local = ntohl(local.s_addr);
 	tunnel.remote = ntohl(remote.s_addr);
 
-	uptunnel(&tunnel, rdomain, tunneldomain);
+	uptunnel(&tunnel, rdomain, tunneldomain, local44addr);
 
 	return 0;
 }

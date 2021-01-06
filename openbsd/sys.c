@@ -111,7 +111,7 @@ initsock(const char *restrict iface, const char *restrict group, int port, int r
  * 6. Configure IP on the interface.
  */
 int
-uptunnel(Tunnel *tunnel, int rdomain, int tunneldomain)
+uptunnel(Tunnel *tunnel, int rdomain, int tunneldomain, uint32_t endpoint)
 {
 	struct ifreq ifr;
 	struct if_laddrreq tr;
@@ -178,10 +178,12 @@ uptunnel(Tunnel *tunnel, int rdomain, int tunneldomain)
 		fatal("cannot set flags for %s: %m", tunnel->ifname);
 
 	// Configure IP on the interface.  Ideally, this wouldn't be
-	// necessary, so we just configure it with the 0 address as
+	// necessary, but the default source address and source addresses
+	// for ICMP errors are taken from the source side.  So we configure
+	// that with the local 44net address and the remote end with 0 as
 	// a dummy.
 	strlcpy(ir.ifra_name, tunnel->ifname, sizeof(ir.ifra_name));
-	addr.sin_addr.s_addr = htonl(0);
+	addr.sin_addr.s_addr = htonl(endpoint);
 	memmove(&ir.ifra_addr, &addr, sizeof(addr));
 	addr.sin_addr.s_addr = htonl(0xFFFFFFFF);
 	memmove(&ir.ifra_mask, &addr, sizeof(addr));

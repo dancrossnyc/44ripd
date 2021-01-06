@@ -74,6 +74,7 @@ enum {
 };
 
 const char *DEFAULT_LOCAL_ADDRESS = "23.30.150.141";
+const char *DEFAULT_LOCAL_44ADDRESS = "44.44.107.1";
 const char *DEFAULT_GATEWAY_ADDRESS = "169.228.34.84";
 const char *RIPV2_GROUP = "224.0.0.9";
 const char *PASSWORD = "pLaInTeXtpAsSwD";
@@ -86,6 +87,7 @@ Bitvec *staticinterfaces;
 
 const char *prog;
 uint32_t localaddr;
+uint32_t local44addr;
 uint32_t defgwaddr;
 int routedomain;
 int tunneldomain;
@@ -107,7 +109,7 @@ main(int argc, char *argv[])
 int
 init(int argc, char *argv[])
 {
-	const char *localip;
+	const char *localip, *local44;
 	char *iface = "*";
 	char *slash;
 	int sd, ch, daemonize;
@@ -120,6 +122,7 @@ init(int argc, char *argv[])
 	staticinterfaces = mkbitvec();
 	routedomain = DEFAULT_ROUTE_TABLE;
 	tunneldomain = DEFAULT_ROUTE_TABLE;
+	local44 = DEFAULT_LOCAL_44ADDRESS;
 	localip = DEFAULT_LOCAL_ADDRESS;
 	routes = mkipmap();
 	tunnels = mkipmap();
@@ -133,6 +136,9 @@ init(int argc, char *argv[])
 			break;
 		case 'D':
 			routedomain = strnum(optarg);
+			break;
+		case 'l':
+			local44 = optarg;
 			break;
 		case 'L':
 			localip = optarg;
@@ -172,6 +178,10 @@ init(int argc, char *argv[])
 	memset(&addr, 0, sizeof(addr));
 	inet_pton(AF_INET, localip, &addr);
 	localaddr = ntohl(addr.s_addr);
+
+	memset(&addr, 0, sizeof(addr));
+	inet_pton(AF_INET, local44, &addr);
+	local44addr = ntohl(addr.s_addr);
 
 	memset(&addr, 0, sizeof(addr));
 	inet_pton(AF_INET, DEFAULT_GATEWAY_ADDRESS, &addr);
@@ -255,7 +265,7 @@ ripresponse(RIPResponse *response, time_t now)
 	if (tunnel == NULL && defgwaddr != response->nexthop) {
 		tunnel = mktunnel(localaddr, response->nexthop);
 		alloctunif(tunnel, interfaces);
-		uptunnel(tunnel, routedomain, tunneldomain);
+		uptunnel(tunnel, routedomain, tunneldomain, local44addr);
 		ipmapinsert(tunnels, response->nexthop, CIDR_HOST, tunnel);
 	}
 	route = ipmapfind(routes, response->ipaddr, cidr);

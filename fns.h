@@ -24,7 +24,7 @@ void *ipmapnearest(IPMap *map, uint32_t key, size_t keylen);
 void *ipmapfind(IPMap *map, uint32_t key, size_t keylen);
 int initsock(const char *restrict iface, const char *restrict group, int port, int rtable);
 void initsys(int rtable);
-int uptunnel(Tunnel *tunnel, int rdomain, int tunneldomain);
+int uptunnel(Tunnel *tunnel, int rdomain, int tunneldomain, uint32_t endpoint);
 int downtunnel(Tunnel *tunnel);
 int addroute(Route *route, Tunnel *tunnel, int rtable);
 int chroute(Route *route, Tunnel *tunnel, int rtable);
