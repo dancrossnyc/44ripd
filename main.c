@@ -300,9 +300,9 @@ mkroute(uint32_t ipnet, uint32_t subnetmask, uint32_t gateway)
 	route = calloc(1, sizeof(*route));
 	if (route == NULL)
 		fatal("malloc");
-	route->ipnet = htonl(ipnet);
-	route->subnetmask = htonl(subnetmask);
-	route->gateway = htonl(gateway);
+	route->ipnet = ipnet;
+	route->subnetmask = subnetmask;
+	route->gateway = gateway;
 
 	return route;
 }
