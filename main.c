@@ -73,8 +73,8 @@ enum {
 	TIMEOUT = 15*60,	// 15 minutes.
 };
 
-const char *DEFAULT_LOCAL_ADDRESS = "23.30.150.141";
-const char *DEFAULT_LOCAL_44ADDRESS = "44.44.107.1";
+const char *DEFAULT_LOCAL_ADDRESS = "10.5.0.28";
+const char *DEFAULT_LOCAL_44ADDRESS = "44.94.84.0";
 const char *DEFAULT_GATEWAY_ADDRESS = "169.228.34.84";
 const char *RIPV2_GROUP = "224.0.0.9";
 const char *PASSWORD = "pLaInTeXtpAsSwD";
@@ -300,9 +300,9 @@ mkroute(uint32_t ipnet, uint32_t subnetmask, uint32_t gateway)
 	route = calloc(1, sizeof(*route));
 	if (route == NULL)
 		fatal("malloc");
-	route->ipnet = htonl(ipnet);
-	route->subnetmask = htonl(subnetmask);
-	route->gateway = htonl(gateway);
+	route->ipnet = ipnet;
+	route->subnetmask = subnetmask;
+	route->gateway = gateway;
 
 	return route;
 }

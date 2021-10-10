@@ -330,7 +330,8 @@ rmroute(Route *route, int rtable)
 void
 ipaddrstr(uint32_t addr, char buf[static INET_ADDRSTRLEN])
 {
-	inet_ntop(AF_INET, &addr, buf, INET_ADDRSTRLEN);
+	uint32_t l_addr = htonl(addr);
+	inet_ntop(AF_INET, &l_addr, buf, INET_ADDRSTRLEN);
 }
 
 void
@@ -340,9 +341,9 @@ routestr(Route *route, Tunnel *tunnel, char *buf, size_t size)
 	size_t cidr;
 
 	assert(route != NULL);
-	cidr = netmask2cidr(route->subnetmask);
-	ipaddrstr(route->ipnet, proute);
-	ipaddrstr(route->gateway, gw);
+	cidr = netmask2cidr(ntohl(route->subnetmask));
+	ipaddrstr(ntohl(route->ipnet), proute);
+	ipaddrstr(ntohl(route->gateway), gw);
 
 	assert(buf != NULL);
 	snprintf(buf, size, "%s/%zu -> %s", proute, cidr, gw);

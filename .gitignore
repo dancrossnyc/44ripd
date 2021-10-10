@@ -1,0 +1,13 @@
+**.o
+**.core
+44ripd
+amprroute
+testbitvec
+testipmapfind
+testipmapinsert
+testipmapnearest
+testisvalidnetmask
+testnetmask2cidr
+testrevbits
+uptunnel
+
