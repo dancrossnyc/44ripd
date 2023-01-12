@@ -74,7 +74,7 @@ enum {
 };
 
 const char *DEFAULT_LOCAL_ADDRESS = "23.30.150.141";
-const char *DEFAULT_LOCAL_44ADDRESS = "44.44.107.1";
+const char *DEFAULT_LOCAL_44ADDRESS = "44.44.48.1";
 const char *DEFAULT_GATEWAY_ADDRESS = "169.228.34.84";
 const char *RIPV2_GROUP = "224.0.0.9";
 const char *PASSWORD = "pLaInTeXtpAsSwD";
